@@ -26,12 +26,38 @@ export type CommunitySpotPayload = {
   price: string;
   status: string;
   category: string;
-  rating: string;
   confirmations: number;
   lat: number;
   lng: number;
   description: string;
   imageDataUrl?: string;
+  createdBy?: string;
+  createdByName?: string;
+};
+
+export type ProfilePayload = {
+  id: string;
+  profileName: string;
+  publicSpots: boolean;
+  publicScans: boolean;
+  publicComments: boolean;
+};
+
+export type ScanPayload = {
+  userId: string;
+  type: string;
+  title: string;
+  subtitle: string;
+  payload: unknown;
+  isPublic: boolean;
+};
+
+export type CommentPayload = {
+  spotId: number;
+  userId: string;
+  authorName: string;
+  body: string;
+  isPublic: boolean;
 };
 
 export type IngredientAnalysis = {
@@ -62,11 +88,11 @@ export async function analyzeIngredientPhoto(imageDataUrl: string, signal?: Abor
   return data.result;
 }
 
-export async function analyzeMenuPhoto(imageDataUrl: string, signal?: AbortSignal): Promise<string> {
+export async function analyzeMenuPhoto(imageDataUrls: string[], signal?: AbortSignal): Promise<string> {
   const response = await fetch(`${API_BASE}/api/analyze-ingredients`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ imageDataUrl, mode: "menu" }),
+    body: JSON.stringify({ imageDataUrl: imageDataUrls[0], imageDataUrls, mode: "menu" }),
     signal
   });
   const data = await response.json();
@@ -107,5 +133,59 @@ export async function confirmCommunitySpot(id: number) {
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Spot konnte nicht bestaetigt werden.");
+  return data.item;
+}
+
+export async function fetchProfile(userId: string) {
+  const response = await fetch(`${API_BASE}/api/profile?userId=${encodeURIComponent(userId)}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Profil nicht erreichbar.");
+  return data.profile;
+}
+
+export async function saveProfile(profile: ProfilePayload) {
+  const response = await fetch(`${API_BASE}/api/profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(profile)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Profil konnte nicht gespeichert werden.");
+  return data.profile;
+}
+
+export async function fetchScans(userId: string) {
+  const response = await fetch(`${API_BASE}/api/scans?userId=${encodeURIComponent(userId)}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Scans nicht erreichbar.");
+  return data.items || [];
+}
+
+export async function saveScan(scan: ScanPayload) {
+  const response = await fetch(`${API_BASE}/api/scans`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(scan)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Scan konnte nicht gespeichert werden.");
+  return data.item;
+}
+
+export async function fetchComments(spotId: number) {
+  const response = await fetch(`${API_BASE}/api/comments?spotId=${encodeURIComponent(String(spotId))}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Kommentare nicht erreichbar.");
+  return data.items || [];
+}
+
+export async function saveComment(comment: CommentPayload) {
+  const response = await fetch(`${API_BASE}/api/comments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(comment)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Kommentar konnte nicht gespeichert werden.");
   return data.item;
 }

@@ -25,6 +25,8 @@ Kopiere `.env.example` zu `.env`, setze die Variablen im Terminal oder trage sie
 - `GOOGLE_MAPS_API_KEY` aktiviert Google Places fuer echte Standortvorschlaege. Ohne Key nutzt der Server OpenStreetMap Nominatim als reale freie Quelle.
 - `SUPABASE_URL` ist die Project URL aus deinem Supabase-Projekt.
 - `SUPABASE_SERVICE_ROLE_KEY` ist der geheime Service-Role-Key fuer die serverseitigen API-Routen. Nicht mit `VITE_` prefixen und nicht im Frontend verwenden.
+- `VITE_SUPABASE_URL` ist dieselbe Project URL fuer Supabase Auth im Frontend.
+- `VITE_SUPABASE_ANON_KEY` ist der oeffentliche `anon` Key fuer Supabase Auth im Frontend.
 
 ## Supabase
 
@@ -33,6 +35,8 @@ Lege die Tabelle in Supabase unter `SQL Editor` mit dem Script aus `supabase/sch
 ```bash
 SUPABASE_URL=https://dein-projekt.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=dein-service-role-key
+VITE_SUPABASE_URL=https://dein-projekt.supabase.co
+VITE_SUPABASE_ANON_KEY=dein-anon-key
 ```
 
 Die App nutzt Supabase fuer Community-Spots:
@@ -40,6 +44,14 @@ Die App nutzt Supabase fuer Community-Spots:
 - `GET /api/community-spots` laedt Spots aus der Tabelle `community_spots`.
 - `POST /api/community-spots` speichert neue Spots.
 - `POST /api/community-spots/confirm` zaehlt Spot-Bestaetigungen hoch.
+
+Supabase Auth wird im Frontend genutzt:
+
+- Aktiviere in Supabase unter `Authentication -> Providers` den Provider `Email`.
+- Fuer Social Login aktiviere dort zusaetzlich `Google`.
+- Trage in Supabase unter `Authentication -> URL Configuration` deine lokale URL und Vercel-Domain als erlaubte Redirect URLs ein.
+- Fuehre `supabase/profiles-and-activity.sql` aus, damit Profile, Scan-Verlauf und Kommentare in Supabase sichtbar werden.
+- Passwoerter werden nicht in eigenen Tabellen gespeichert; Supabase Auth verwaltet sie intern.
 
 ## Vercel Deploy
 

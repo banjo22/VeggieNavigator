@@ -6,12 +6,20 @@ import {
   analyzeIngredientPhoto,
   confirmCommunitySpot as saveSpotConfirmation,
   createCommunitySpot as saveCommunitySpot,
+  fetchComments,
   fetchCommunitySpots,
+  fetchProfile,
+  fetchScans,
   fetchPriceOptions,
+  saveComment,
+  saveProfile as saveUserProfile,
+  saveScan,
   searchPlaces,
+  type CommentPayload,
   type CommunitySpotPayload,
   type IngredientAnalysis,
   type PlaceSuggestion,
+  type ProfilePayload,
   type PriceOption
 } from "./services/api";
 import {
@@ -23,6 +31,7 @@ import {
   type CommunitySpot,
   type VeggieStatus
 } from "./data/mockData";
+import { authConfigured, getCurrentUser, logout, onAuthChange, signInWithOAuth, signInWithPassword, signUpWithPassword, updateProfileName, type AuthUser } from "./services/auth";
 import { fetchProductByBarcode, type ProductResult } from "./services/openFoodFacts";
 
 type Screen = "home" | "scanner" | "map" | "add" | "pricing" | "profile";
@@ -33,9 +42,12 @@ type ScanHistoryItem =
   | { id: number; type: "product"; title: string; subtitle: string; barcode: string; product: ProductResult }
   | { id: number; type: "ingredients"; title: string; subtitle: string; photo: string; analysis: IngredientAnalysis }
   | { id: number; type: "menu"; title: string; subtitle: string; photo: string; text: string };
+type SpotComment = { id: number; author: string; text: string; createdAt: string };
+type ProfilePrivacy = { publicSpots: boolean; publicScans: boolean; publicComments: boolean };
 
 const SCAN_HISTORY_STORAGE_KEY = "veggie-navigator-scan-history";
 const SCAN_HISTORY_LIMIT = 10;
+const PROFILE_PRIVACY_STORAGE_KEY = "veggie-navigator-profile-privacy";
 
 declare global {
   interface Window {
@@ -168,7 +180,7 @@ function HomeScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
   );
 }
 
-function ScannerScreen() {
+function ScannerScreen({ user }: { user: AuthUser | null }) {
   const [scanMode, setScanMode] = useState<"ingredients" | "menu">("ingredients");
   const [barcode, setBarcode] = useState("");
   const [product, setProduct] = useState<ProductResult | null>(null);
@@ -177,7 +189,7 @@ function ScannerScreen() {
   const [pricesLoading, setPricesLoading] = useState(false);
   const [analysis, setAnalysis] = useState<IngredientAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
-  const [menuPhoto, setMenuPhoto] = useState("");
+  const [menuPhotos, setMenuPhotos] = useState<string[]>([]);
   const [menuText, setMenuText] = useState("");
   const [menuLoading, setMenuLoading] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
@@ -351,26 +363,31 @@ function ScannerScreen() {
       setIngredientPhoto(imageDataUrl);
       void runIngredientAnalysis(imageDataUrl);
     } else {
-      setMenuPhoto(imageDataUrl);
-      void runMenuAnalysis(imageDataUrl);
+      setMenuPhotos((current) => [...current, imageDataUrl].slice(0, 8));
+      setMenuMessage("Seite hinzugefuegt. Du kannst weitere Seiten fotografieren oder analysieren.");
     }
   }
 
   function handleIngredientUpload(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const imageDataUrl = String(reader.result);
-      if (scanMode === "ingredients") {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+    if (scanMode === "ingredients") {
+      const file = files[0];
+      const reader = new FileReader();
+      reader.onload = () => {
+        const imageDataUrl = String(reader.result);
         setIngredientPhoto(imageDataUrl);
         void runIngredientAnalysis(imageDataUrl);
-      } else {
-        setMenuPhoto(imageDataUrl);
-        void runMenuAnalysis(imageDataUrl);
-      }
-    };
-    reader.readAsDataURL(file);
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+
+    void readImageFiles(files.slice(0, 8 - menuPhotos.length)).then((images) => {
+      setMenuPhotos((current) => [...current, ...images].slice(0, 8));
+      setMenuMessage(`${images.length} Seite${images.length === 1 ? "" : "n"} hinzugefuegt.`);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }).catch(() => setMenuMessage("Bilder konnten nicht gelesen werden."));
   }
 
   async function runIngredientAnalysis(imageDataUrl: string) {
@@ -404,7 +421,11 @@ function ScannerScreen() {
     }
   }
 
-  async function runMenuAnalysis(imageDataUrl: string) {
+  async function runMenuAnalysis(images = menuPhotos) {
+    if (images.length === 0) {
+      setMenuMessage("Bitte lade mindestens eine Speisekarten-Seite hoch oder fotografiere sie.");
+      return;
+    }
     analysisAbortRef.current?.abort();
     if (analysisTimeoutRef.current) window.clearTimeout(analysisTimeoutRef.current);
     const controller = new AbortController();
@@ -414,14 +435,14 @@ function ScannerScreen() {
     setMenuText("");
     setMenuMessage("Speisekarte wird analysiert.");
     try {
-      const result = await analyzeMenuPhoto(imageDataUrl, controller.signal);
+      const result = await analyzeMenuPhoto(images, controller.signal);
       setMenuText(result);
       addScanHistory({
         id: Date.now(),
         type: "menu",
-        title: "Speisekarte",
+        title: `Speisekarte (${images.length} Seite${images.length === 1 ? "" : "n"})`,
         subtitle: result.split("\n").find(Boolean)?.slice(0, 72) || "Analyse gespeichert",
-        photo: imageDataUrl,
+        photo: images[0],
         text: result
       });
       setMenuLoading(false);
@@ -446,7 +467,7 @@ function ScannerScreen() {
       setAnalysis(null);
       setIngredientMessage("Analyse abgebrochen.");
     } else {
-      setMenuPhoto("");
+      setMenuPhotos([]);
       setMenuText("");
       setMenuMessage("Analyse abgebrochen.");
     }
@@ -468,7 +489,7 @@ function ScannerScreen() {
       setAnalysis(null);
       setIngredientMessage("");
     } else {
-      setMenuPhoto("");
+      setMenuPhotos([]);
       setMenuText("");
       setMenuMessage("");
     }
@@ -479,6 +500,17 @@ function ScannerScreen() {
 
   function addScanHistory(item: ScanHistoryItem) {
     setScanHistory((current) => [item, ...current.filter((entry) => getScanHistoryKey(entry) !== getScanHistoryKey(item))].slice(0, SCAN_HISTORY_LIMIT));
+    if (user) {
+      const privacy = readProfilePrivacy();
+      void saveScan({
+        userId: user.id,
+        type: item.type,
+        title: item.title,
+        subtitle: item.subtitle,
+        payload: item,
+        isPublic: privacy.publicScans
+      }).catch(console.warn);
+    }
   }
 
   function restoreScan(item: ScanHistoryItem) {
@@ -497,7 +529,7 @@ function ScannerScreen() {
       return;
     }
     setScanMode("menu");
-    setMenuPhoto(item.photo);
+    setMenuPhotos([item.photo]);
     setMenuText(item.text);
   }
 
@@ -509,7 +541,7 @@ function ScannerScreen() {
     setScanHistory([]);
   }
 
-  const hasCurrentScan = scanMode === "ingredients" ? Boolean(ingredientPhoto || analysis || analysisLoading) : Boolean(menuPhoto || menuText || menuLoading);
+  const hasCurrentScan = scanMode === "ingredients" ? Boolean(ingredientPhoto || analysis || analysisLoading) : Boolean(menuPhotos.length || menuText || menuLoading);
 
   return (
     <>
@@ -528,7 +560,7 @@ function ScannerScreen() {
               <>
                 <div className="mt-5 flex flex-col gap-2 sm:flex-row">
                   <button onClick={() => void startCameraScan()} className="inline-flex flex-1 items-center justify-center rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft">
-                    <Camera className="mr-2" size={18} /> Kamera scannen
+                    <Camera className="mr-2" size={18} /> Scannen
                   </button>
                   <input value={barcode} onChange={(event) => setBarcode(event.target.value)} inputMode="numeric" className="min-w-0 flex-1 rounded-2xl bg-white px-4 py-3 text-center font-bold outline-none focus:ring-2 focus:ring-moss" aria-label="Barcode" placeholder="Barcode eingeben" />
                   <button onClick={() => scanProduct()} disabled={loading} className="inline-flex flex-1 items-center justify-center rounded-2xl bg-ink px-5 py-3 font-bold text-white shadow-soft disabled:opacity-60">
@@ -539,15 +571,22 @@ function ScannerScreen() {
                 {cameraActive && <button onClick={stopCamera} className="mt-3 rounded-full bg-white px-4 py-2 text-sm font-bold text-moss">Kamera stoppen</button>}
               </>
             )}
-            <label className="mt-4 flex cursor-pointer flex-col items-center rounded-3xl border-2 border-dashed border-oat bg-white p-5">
-              <UploadCloud className="text-moss" />
-              <span className="mt-2 font-bold">{scanMode === "ingredients" ? "Zutatenliste fotografieren" : "Speisekarte fotografieren"}</span>
-              <span className="mt-1 text-sm text-ink/55">{scanMode === "ingredients" ? "KI prueft Zutaten." : "Optionen werden knapp sortiert."}</span>
-              <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleIngredientUpload} className="hidden" />
-            </label>
-            <button onClick={() => void startPhotoCamera()} className="mt-3 inline-flex items-center justify-center rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft">
-              <Camera className="mr-2" size={18} /> Kamera direkt nutzen
-            </button>
+            <div className="mt-4 rounded-3xl border-2 border-dashed border-oat bg-white p-5 shadow-sm">
+              <div className="mx-auto grid size-12 place-items-center rounded-2xl bg-sage text-moss">
+                <UploadCloud />
+              </div>
+              <span className="mt-3 block text-lg font-bold">{scanMode === "ingredients" ? "Zutatenliste fotografieren" : "Speisekarte fotografieren"}</span>
+              <span className="mx-auto mt-1 block max-w-lg text-sm leading-6 text-ink/55">{scanMode === "ingredients" ? "Ein Foto reicht meistens. Die KI prueft die sichtbaren Zutaten." : "Fuege mehrere Seiten hinzu, wenn die Speisekarte laenger ist. Du siehst jede Seite unten als Vorschau."}</span>
+              <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex items-center justify-center rounded-2xl bg-ink px-5 py-3 font-bold text-white shadow-soft">
+                  <UploadCloud className="mr-2" size={18} /> Datei hochladen
+                </button>
+                <button type="button" onClick={() => void startPhotoCamera()} className="inline-flex items-center justify-center rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft">
+                  <Camera className="mr-2" size={18} /> Kamera nutzen
+                </button>
+              </div>
+              <input ref={fileInputRef} type="file" accept="image/*" multiple={scanMode === "menu"} onChange={handleIngredientUpload} className="hidden" />
+            </div>
             {photoCameraActive && (
               <div className="mt-4 rounded-3xl bg-white p-3">
                 <video ref={photoVideoRef} className="aspect-video w-full rounded-2xl bg-ink object-cover" muted playsInline />
@@ -558,7 +597,7 @@ function ScannerScreen() {
               </div>
             )}
             {scanMode === "ingredients" && ingredientPhoto && <img src={ingredientPhoto} alt="Zutatenfoto Vorschau" className="mt-4 max-h-52 w-full rounded-3xl object-cover" />}
-            {scanMode === "menu" && menuPhoto && <img src={menuPhoto} alt="Speisekarte Vorschau" className="mt-4 max-h-52 w-full rounded-3xl object-cover" />}
+            {scanMode === "menu" && menuPhotos.length > 0 && <MenuPhotoStrip photos={menuPhotos} removePhoto={(index) => setMenuPhotos((current) => current.filter((_, photoIndex) => photoIndex !== index))} analyze={() => void runMenuAnalysis()} loading={menuLoading} />}
             {((scanMode === "ingredients" && analysisLoading) || (scanMode === "menu" && menuLoading)) && <LoadingAnalysis label={scanMode === "ingredients" ? "Zutaten werden gecheckt" : "Speisekarte wird gecheckt"} onCancel={cancelAnalysis} />}
             {scanMode === "ingredients" && analysis && <AnalysisBox title="KI-Ergebnis" badge={analysis.status}><p>{analysis.explanation}</p>{analysis.problematicIngredients?.length > 0 && <p className="mt-2 font-semibold text-tomato">Kritisch: {analysis.problematicIngredients.join(", ")}</p>}</AnalysisBox>}
             {scanMode === "menu" && menuText && <AnalysisBox title="Speisekarte"><p className="whitespace-pre-wrap">{menuText}</p></AnalysisBox>}
@@ -668,6 +707,33 @@ function ScanHistoryList({ items, restoreScan, deleteItem, clearItems }: { items
   );
 }
 
+function MenuPhotoStrip({ photos, removePhoto, analyze, loading }: { photos: string[]; removePhoto: (index: number) => void; analyze: () => void; loading: boolean }) {
+  return (
+    <div className="mt-4 rounded-3xl bg-white p-4 text-left shadow-sm">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-bold">Speisekarten-Seiten</p>
+          <p className="mt-1 text-xs font-semibold text-ink/50">{photos.length} von 8 Seiten hinzugefuegt</p>
+        </div>
+        <button onClick={analyze} disabled={loading || photos.length === 0} className="inline-flex items-center rounded-2xl bg-ink px-4 py-3 text-sm font-bold text-white disabled:opacity-60">
+          {loading ? <Loader2 className="mr-2 animate-spin" size={16} /> : <Search className="mr-2" size={16} />} Analysieren
+        </button>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {photos.map((photo, index) => (
+          <div key={`${photo.slice(0, 32)}-${index}`} className="group relative overflow-hidden rounded-2xl bg-cream">
+            <img src={photo} alt={`Speisekarte Seite ${index + 1}`} className="aspect-[3/4] w-full object-cover" />
+            <span className="absolute left-2 top-2 rounded-full bg-white/95 px-2 py-1 text-xs font-bold text-moss shadow-sm">Seite {index + 1}</span>
+            <button onClick={() => removePhoto(index)} className="absolute right-2 top-2 grid size-8 place-items-center rounded-full bg-ink/80 text-white opacity-100 shadow-sm hover:bg-tomato sm:opacity-0 sm:group-hover:opacity-100" aria-label={`Seite ${index + 1} entfernen`}>
+              <X size={15} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LoadingAnalysis({ label, onCancel }: { label: string; onCancel: () => void }) {
   return (
     <div className="mt-4 flex items-center justify-between gap-3 rounded-3xl bg-white p-4 text-left">
@@ -692,9 +758,10 @@ function AnalysisBox({ title, badge, children }: { title: string; badge?: string
   );
 }
 
-function MapScreen({ finds, setScreen, confirmFind }: { finds: Find[]; setScreen: (screen: Screen) => void; confirmFind: (id: number) => void }) {
+function MapScreen({ finds, setScreen, confirmFind, user }: { finds: Find[]; setScreen: (screen: Screen) => void; confirmFind: (id: number) => void; user: AuthUser | null }) {
   const [active, setActive] = useState(categories[0]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [detailFind, setDetailFind] = useState<Find | null>(null);
   const [userLocation, setUserLocation] = useState<UserLocation | null>(null);
   const [locationMessage, setLocationMessage] = useState("");
   const visible = active === categories[0] ? finds : finds.filter((find) => find.category === active);
@@ -739,8 +806,8 @@ function MapScreen({ finds, setScreen, confirmFind }: { finds: Find[]; setScreen
       <div className="mb-4 flex gap-2 overflow-x-auto pb-2">
         {categories.map((category) => <button key={category} onClick={() => setActive(category)} className={`shrink-0 rounded-full px-4 py-2 text-sm font-bold ${active === category ? "bg-moss text-white" : "bg-white"}`}>{category}</button>)}
       </div>
-      <section className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-        <div className="relative min-h-96 overflow-hidden rounded-3xl bg-sage shadow-soft">
+      <section className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="relative h-[24rem] overflow-hidden rounded-3xl bg-sage shadow-soft lg:h-[min(70vh,42rem)]">
           {bbox && center ? (
             <>
               <iframe title="OpenStreetMap Karte" src={mapUrl} className="absolute inset-0 h-full w-full border-0" loading="lazy" />
@@ -759,7 +826,7 @@ function MapScreen({ finds, setScreen, confirmFind }: { finds: Find[]; setScreen
               <a href={`https://www.openstreetmap.org/?mlat=${center.lat}&mlon=${center.lng}#map=15/${center.lat}/${center.lng}`} target="_blank" rel="noreferrer" className="absolute bottom-4 left-4 rounded-2xl bg-white/95 px-4 py-3 text-sm font-bold text-moss backdrop-blur">In OpenStreetMap oeffnen</a>
             </>
           ) : (
-            <div className="grid min-h-96 place-items-center p-6 text-center">
+            <div className="grid h-full place-items-center p-6 text-center">
               <div>
                 <MapPinned className="mx-auto text-moss" size={44} />
                 <p className="mt-3 text-lg font-bold">Noch keine Spots auf der Karte</p>
@@ -769,11 +836,12 @@ function MapScreen({ finds, setScreen, confirmFind }: { finds: Find[]; setScreen
             </div>
           )}
         </div>
-        <div className="space-y-3">
-          {displayFinds.map((find) => <FindCard key={find.id} find={find} confirmFind={confirmFind} selected={find.id === selectedId} selectFind={() => setSelectedId(find.id)} />)}
+        <div className="max-h-[32rem] space-y-3 overflow-y-auto pr-1 lg:max-h-[min(70vh,42rem)]">
+          {displayFinds.map((find) => <FindCard key={find.id} find={find} confirmFind={confirmFind} selected={find.id === selectedId} openFind={() => { setSelectedId(find.id); setDetailFind(find); }} />)}
           {displayFinds.length === 0 && <p className="rounded-2xl bg-white p-5 text-ink/60">In dieser Kategorie gibt es noch keinen Spot. Fueg den ersten hinzu.</p>}
         </div>
       </section>
+      {detailFind && <FindDetailModal find={detailFind} finds={finds} confirmFind={confirmFind} close={() => setDetailFind(null)} setScreen={setScreen} user={user} />}
     </>
   );
 }
@@ -806,13 +874,13 @@ function getMarkerPosition(find: Pick<Find, "lat" | "lng">, bbox: ReturnType<typ
   };
 }
 
-function FindCard({ find, confirmFind, selected, selectFind }: { find: Find; confirmFind: (id: number) => void; selected: boolean; selectFind: () => void }) {
+function FindCard({ find, confirmFind, selected, openFind }: { find: Find; confirmFind: (id: number) => void; selected: boolean; openFind: () => void }) {
   const confirmations = find.confirmations ?? 0;
   const isConfirmed = find.viewerConfirmed ?? false;
   const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${find.lat},${find.lng}`)}`;
   return (
     <article className={`rounded-3xl bg-white p-4 shadow-soft ring-2 transition ${selected ? "ring-moss" : "ring-transparent"}`}>
-      <button onClick={selectFind} className="flex w-full gap-4 text-left">
+      <button onClick={openFind} className="flex w-full gap-4 text-left">
         <div className="grid size-20 shrink-0 place-items-center overflow-hidden rounded-2xl bg-oat text-moss">
           {find.imageDataUrl ? <img src={find.imageDataUrl} alt="" className="h-full w-full object-cover" /> : <FindIcon category={find.category} size={28} />}
         </div>
@@ -823,7 +891,7 @@ function FindCard({ find, confirmFind, selected, selectFind }: { find: Find; con
           </div>
           <p className="mt-1 text-sm text-ink/60">{find.place}{find.distance ? ` - ${find.distance}` : ""}</p>
           <p className="mt-2 text-sm leading-6">{find.description}</p>
-          <p className="mt-2 text-sm font-semibold text-moss">{find.price} - zuletzt bestaetigt {find.confirmed} - {find.rating}/5</p>
+          <p className="mt-2 text-sm font-semibold text-moss">{find.price} - zuletzt bestaetigt {find.confirmed}</p>
         </div>
       </button>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -838,7 +906,177 @@ function FindCard({ find, confirmFind, selected, selectFind }: { find: Find; con
   );
 }
 
-function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPayload) => Promise<void>; setScreen: (screen: Screen) => void }) {
+function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: { find: Find; finds: Find[]; confirmFind: (id: number) => void; close: () => void; setScreen: (screen: Screen) => void; user: AuthUser | null }) {
+  const [locallyConfirmed, setLocallyConfirmed] = useState(Boolean(find.viewerConfirmed));
+  const [localConfirmations, setLocalConfirmations] = useState(find.confirmations ?? 0);
+  const confirmations = localConfirmations;
+  const isConfirmed = locallyConfirmed;
+  const isLoggedIn = Boolean(user);
+  const [imageOpen, setImageOpen] = useState(false);
+  const [publicProfile, setPublicProfile] = useState<{ id?: string; name: string } | null>(null);
+  const [comments, setComments] = useState<SpotComment[]>(() => readSpotComments(find.id));
+  const [commentText, setCommentText] = useState("");
+  const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${find.lat},${find.lng}`)}`;
+
+  useEffect(() => {
+    let active = true;
+    void fetchComments(find.id).then((items) => {
+      if (active) setComments(items);
+    }).catch(console.warn);
+    return () => {
+      active = false;
+    };
+  }, [find.id]);
+
+  function confirmFromDetail() {
+    if (isConfirmed) return;
+    setLocallyConfirmed(true);
+    setLocalConfirmations((current) => current + 1);
+    confirmFind(find.id);
+  }
+
+  function submitComment() {
+    const text = commentText.trim();
+    if (!isLoggedIn || !text) return;
+    const currentUser = user;
+    if (!currentUser) return;
+    const payload: CommentPayload = {
+      spotId: find.id,
+      userId: currentUser.id,
+      authorName: getUserDisplayName(currentUser),
+      body: text,
+      isPublic: readProfilePrivacy().publicComments
+    };
+    const comment = {
+      id: Date.now(),
+      author: getUserDisplayName(currentUser),
+      text,
+      createdAt: new Date().toISOString()
+    };
+    const next = [comment, ...comments].slice(0, 50);
+    setComments(next);
+    saveSpotComments(find.id, next);
+    void saveComment(payload).then((saved) => {
+      setComments((current) => [saved, ...current.filter((item) => item.id !== comment.id)]);
+    }).catch(console.warn);
+    setCommentText("");
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 grid place-items-end bg-ink/45 p-0 backdrop-blur-sm sm:place-items-center sm:p-6" role="dialog" aria-modal="true">
+      <article className="max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-cream shadow-soft sm:max-w-2xl sm:rounded-3xl">
+        <div className="relative h-72 overflow-hidden bg-oat sm:h-96">
+          {find.imageDataUrl ? (
+            <button onClick={() => setImageOpen(true)} className="h-full w-full bg-ink/5 p-3" aria-label="Bild gross anzeigen">
+              <img src={find.imageDataUrl} alt={find.name} className="h-full w-full rounded-2xl object-contain" />
+            </button>
+          ) : <div className="grid h-full place-items-center text-moss"><FindIcon category={find.category} size={72} /></div>}
+          <button onClick={close} className="absolute right-4 top-4 grid size-10 place-items-center rounded-full bg-white/95 text-ink shadow-soft" aria-label="Details schliessen"><X size={18} /></button>
+          {find.imageDataUrl && <button onClick={() => setImageOpen(true)} className="absolute left-4 top-4 rounded-full bg-white/95 px-4 py-2 text-sm font-bold text-moss shadow-soft">Bild anzeigen</button>}
+          <div className="absolute bottom-4 left-4 right-4 flex items-end justify-between gap-3">
+            <div>
+              <Badge status={find.status} />
+              <h2 className="mt-2 text-3xl font-bold text-white drop-shadow">{find.name}</h2>
+            </div>
+            <span className="rounded-2xl bg-white/95 px-4 py-3 text-sm font-bold text-moss shadow-soft">{find.price}</span>
+          </div>
+        </div>
+        <div className="space-y-4 p-5">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Ort</span><b>{find.place}</b></div>
+            <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Kategorie</span><b>{find.category}</b></div>
+            <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Bestaetigt</span><b>{confirmations}</b></div>
+          </div>
+          <div className="rounded-3xl bg-white p-5">
+            <p className="text-sm font-bold uppercase text-moss">Beschreibung</p>
+            <p className="mt-2 leading-7 text-ink/75">{find.description}</p>
+            {find.createdByName && (
+              <button onClick={() => setPublicProfile({ id: find.createdBy, name: find.createdByName || "Veggie Nutzer" })} className="mt-3 rounded-full bg-sage px-4 py-2 text-sm font-bold text-moss">
+                Von {find.createdByName}
+              </button>
+            )}
+            <p className="mt-3 text-sm font-semibold text-ink/55">Zuletzt bestaetigt {find.confirmed}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={confirmFromDetail} disabled={isConfirmed} className={`inline-flex items-center gap-2 rounded-2xl px-5 py-3 font-bold ${isConfirmed ? "bg-white text-ink/45" : "bg-sage text-moss"}`}>
+              <Check size={18} /> {isConfirmed ? "Schon bestaetigt" : "Spot bestaetigen"}
+            </button>
+            <a href={mapsUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-2xl bg-ink px-5 py-3 font-bold text-white">
+              <MapPinned size={18} /> Route in Google Maps
+            </a>
+          </div>
+          <section className="rounded-3xl bg-white p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold">Kommentare</h3>
+                <p className="mt-1 text-sm text-ink/55">Fragen, Tipps oder Updates zu diesem Spot.</p>
+              </div>
+              <span className="rounded-full bg-cream px-3 py-1 text-xs font-bold text-ink/50">{comments.length}</span>
+            </div>
+            <div className="mt-4 space-y-2">
+              {comments.map((comment) => (
+                <div key={comment.id} className="rounded-2xl bg-cream p-4 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <b>{comment.author}</b>
+                    <span className="text-xs font-semibold text-ink/45">{formatCommentDate(comment.createdAt)}</span>
+                  </div>
+                  <p className="mt-2 leading-6 text-ink/70">{comment.text}</p>
+                </div>
+              ))}
+              {comments.length === 0 && <div className="rounded-2xl bg-cream p-4 text-sm text-ink/60">Noch keine Kommentare.</div>}
+            </div>
+            <div className="mt-4">
+              <textarea value={commentText} onChange={(event) => setCommentText(event.target.value)} disabled={!isLoggedIn} className="min-h-24 w-full rounded-2xl bg-cream px-4 py-3 outline-none disabled:text-ink/45" placeholder={isLoggedIn ? "Kommentar schreiben..." : "Zum Kommentieren bitte anmelden."} />
+              {isLoggedIn ? (
+                <button type="button" onClick={submitComment} className="mt-3 rounded-2xl bg-moss px-5 py-3 font-bold text-white">Kommentar senden</button>
+              ) : (
+                <button type="button" onClick={() => { close(); setScreen("profile"); }} className="mt-3 inline-flex items-center gap-2 rounded-2xl bg-moss px-5 py-3 font-bold text-white">
+                  <LogIn size={18} /> Zum Kommentieren anmelden
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
+      </article>
+      {imageOpen && find.imageDataUrl && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-ink/90 p-4" role="dialog" aria-modal="true">
+          <button onClick={() => setImageOpen(false)} className="absolute right-4 top-4 grid size-11 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Bild schliessen"><X size={20} /></button>
+          <img src={find.imageDataUrl} alt={find.name} className="max-h-[88vh] max-w-[94vw] rounded-3xl bg-white object-contain p-2 shadow-soft" />
+        </div>
+      )}
+      {publicProfile && <PublicProfileModal profile={publicProfile} finds={finds} close={() => setPublicProfile(null)} />}
+    </div>
+  );
+}
+
+function PublicProfileModal({ profile, finds, close }: { profile: { id?: string; name: string }; finds: Find[]; close: () => void }) {
+  const publicSpots = finds.filter((find) => find.createdBy && find.createdBy === profile.id);
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-end bg-ink/55 p-0 backdrop-blur-sm sm:place-items-center sm:p-6" role="dialog" aria-modal="true">
+      <article className="max-h-[90vh] w-full overflow-y-auto rounded-t-3xl bg-cream p-5 shadow-soft sm:max-w-xl sm:rounded-3xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="grid size-14 place-items-center rounded-2xl bg-moss text-2xl font-black text-white">{profile.name.slice(0, 1).toUpperCase()}</div>
+            <p className="mt-4 text-sm font-bold uppercase text-moss">Oeffentliches Profil</p>
+            <h2 className="mt-1 text-3xl font-bold">{profile.name}</h2>
+            <p className="mt-2 text-sm leading-6 text-ink/60">Geteilte Spots sind oeffentlich. Scans sind standardmaessig privat.</p>
+          </div>
+          <button onClick={close} className="grid size-10 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Profil schliessen"><X size={18} /></button>
+        </div>
+        <div className="mt-5 grid grid-cols-2 gap-3">
+          <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Oeffentliche Spots</span><b className="text-2xl text-moss">{publicSpots.length}</b></div>
+          <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Scans</span><b className="text-lg text-ink/50">privat</b></div>
+        </div>
+        <div className="mt-5 space-y-3">
+          {publicSpots.map((spot) => <ProfileSpotCard key={spot.id} spot={spot} />)}
+          {publicSpots.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-ink/60">Noch keine oeffentlichen Spots.</p>}
+        </div>
+      </article>
+    </div>
+  );
+}
+
+function AddFindScreen({ addFind, setScreen, user }: { addFind: (find: CommunitySpotPayload) => Promise<void>; setScreen: (screen: Screen) => void; user: AuthUser | null }) {
   const [submitted, setSubmitted] = useState(false);
   const [placeQuery, setPlaceQuery] = useState("");
   const [placeOptions, setPlaceOptions] = useState<PlaceSuggestion[]>([]);
@@ -847,6 +1085,19 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPa
   const [placeError, setPlaceError] = useState("");
   const [saving, setSaving] = useState(false);
   const [imageDataUrl, setImageDataUrl] = useState("");
+  const [spotCameraActive, setSpotCameraActive] = useState(false);
+  const spotFileInputRef = useRef<HTMLInputElement | null>(null);
+  const spotVideoRef = useRef<HTMLVideoElement | null>(null);
+  const spotStreamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => () => stopSpotCamera(), []);
+
+  useEffect(() => {
+    if (!spotCameraActive || !spotVideoRef.current || !spotStreamRef.current) return;
+    const video = spotVideoRef.current;
+    video.srcObject = spotStreamRef.current;
+    void video.play().catch(() => setPlaceError("Kamera konnte nicht gestartet werden. Bitte Browser-Berechtigung pruefen."));
+  }, [spotCameraActive]);
 
   useEffect(() => {
     if (placeQuery.trim().length < 3 || selectedPlace?.name === placeQuery) {
@@ -883,15 +1134,16 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPa
       await addFind({
         name: String(form.get("name")),
         place: selectedPlace.name,
-        price: String(form.get("price") || "Preis offen"),
+        price: formatEuroPrice(String(form.get("price") || "")),
         status: form.get("status") as VeggieStatus,
         category: String(form.get("category")),
-        rating: "neu",
         confirmations: 1,
         lat: selectedPlace.lat,
         lng: selectedPlace.lng,
         description: String(form.get("description")),
-        imageDataUrl
+        imageDataUrl,
+        createdBy: user?.id,
+        createdByName: user ? getUserDisplayName(user) : undefined
       });
       setSubmitted(true);
     } catch (error) {
@@ -900,6 +1152,46 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPa
       setSaving(false);
     }
   }
+
+  async function startSpotCamera() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setPlaceError("Kamerazugriff ist in diesem Browser nicht verfuegbar.");
+      return;
+    }
+
+    try {
+      stopSpotCamera();
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+      spotStreamRef.current = stream;
+      setSpotCameraActive(true);
+      setPlaceError("");
+    } catch (error) {
+      setPlaceError(error instanceof DOMException && error.name === "NotAllowedError" ? "Kamera blockiert. Bitte im Browser erlauben." : "Kamera konnte nicht gestartet werden.");
+    }
+  }
+
+  function stopSpotCamera() {
+    spotStreamRef.current?.getTracks().forEach((track) => track.stop());
+    spotStreamRef.current = null;
+    setSpotCameraActive(false);
+  }
+
+  function captureSpotPhoto() {
+    const video = spotVideoRef.current;
+    if (!video || video.readyState < 2) {
+      setPlaceError("Kamera ist noch nicht bereit.");
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    setImageDataUrl(canvas.toDataURL("image/jpeg", 0.82));
+    stopSpotCamera();
+  }
+
   return (
     <>
       <Header eyebrow="Community" title="Essen oder Produkt hinzufuegen" />
@@ -908,11 +1200,34 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPa
         <p className="mt-1 text-sm leading-6 text-ink/70">Du kannst direkt beitragen. Anmeldung ist spaeter nur praktisch, wenn du deine Spots bearbeiten, speichern oder zwischen Geraeten synchronisieren willst.</p>
       </div>
       <form onSubmit={submit} className="grid gap-4 rounded-3xl bg-white p-5 shadow-soft sm:grid-cols-2">
-        <label className="sm:col-span-2">
-          <span className="font-bold">Foto</span>
-          <input type="file" accept="image/*" capture="environment" onChange={(event) => void handleSpotImage(event, setImageDataUrl, setPlaceError)} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 text-sm" />
+        <div className="rounded-3xl bg-cream p-4 sm:col-span-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <span className="font-bold">Foto</span>
+              <p className="mt-1 text-sm text-ink/55">Waehle ein Bild aus der Galerie oder fotografiere den Spot direkt.</p>
+            </div>
+            {imageDataUrl && <button type="button" onClick={() => setImageDataUrl("")} className="grid size-9 shrink-0 place-items-center rounded-full bg-white text-ink/55 hover:bg-tomato hover:text-white" aria-label="Foto entfernen"><X size={16} /></button>}
+          </div>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <button type="button" onClick={() => spotFileInputRef.current?.click()} className="inline-flex items-center justify-center rounded-2xl bg-ink px-5 py-3 font-bold text-white shadow-soft">
+              <UploadCloud className="mr-2" size={18} /> Galerie
+            </button>
+            <button type="button" onClick={() => void startSpotCamera()} className="inline-flex items-center justify-center rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft">
+              <Camera className="mr-2" size={18} /> Kamera
+            </button>
+          </div>
+          <input ref={spotFileInputRef} type="file" accept="image/*" onChange={(event) => void handleSpotImage(event, setImageDataUrl, setPlaceError)} className="hidden" />
+          {spotCameraActive && (
+            <div className="mt-4 rounded-3xl bg-white p-3">
+              <video ref={spotVideoRef} className="aspect-video w-full rounded-2xl bg-ink object-cover" muted playsInline />
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button type="button" onClick={captureSpotPhoto} className="rounded-2xl bg-moss px-4 py-3 font-bold text-white">Foto aufnehmen</button>
+                <button type="button" onClick={stopSpotCamera} className="rounded-2xl bg-cream px-4 py-3 font-bold text-ink/70">Schliessen</button>
+              </div>
+            </div>
+          )}
           {imageDataUrl && <img src={imageDataUrl} alt="Spot Vorschau" className="mt-3 h-44 w-full rounded-2xl object-cover" />}
-        </label>
+        </div>
         <Field name="name" label="Produkt/Gericht" placeholder="z.B. vegane Ube-Schnecke" required />
         <div className="sm:col-span-2">
           <label>
@@ -935,7 +1250,7 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPa
             </div>
           )}
         </div>
-        <Field name="price" label="Preis optional" placeholder="3,20 EUR" />
+        <PriceField />
         <Select name="status" label="Einordnung" options={["vegan", "vegetarisch"]} />
         <Select name="category" label="Kategorie" options={categories.slice(1)} />
         <label className="sm:col-span-2"><span className="font-bold">Kurze Beschreibung</span><textarea name="description" required className="mt-2 min-h-28 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="Was macht den Spot besonders? Was sollte man beim Bestellen beachten?" /></label>
@@ -950,8 +1265,26 @@ function Field({ name, label, placeholder, required = false }: { name: string; l
   return <label><span className="font-bold">{label}</span><input name={name} required={required} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder={placeholder} /></label>;
 }
 
+function PriceField() {
+  return (
+    <label>
+      <span className="font-bold">Preis</span>
+      <span className="mt-2 flex items-center rounded-2xl bg-cream pr-4 focus-within:ring-2 focus-within:ring-moss">
+        <input name="price" inputMode="decimal" required className="min-w-0 flex-1 rounded-2xl bg-transparent px-4 py-3 outline-none" placeholder="3,20" />
+        <span className="font-bold text-moss">€</span>
+      </span>
+    </label>
+  );
+}
+
 function Select({ name, label, options }: { name: string; label: string; options: string[] }) {
   return <label><span className="font-bold">{label}</span><select name={name} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss">{options.map((option) => <option key={option}>{option}</option>)}</select></label>;
+}
+
+function formatEuroPrice(value: string) {
+  const cleaned = value.trim().replace(/\s*(eur|euro|€)\s*$/i, "").trim();
+  if (!cleaned) return "Preis offen";
+  return `${cleaned} €`;
 }
 
 async function handleSpotImage(event: ChangeEvent<HTMLInputElement>, setImageDataUrl: (value: string) => void, setError: (value: string) => void) {
@@ -988,6 +1321,10 @@ function resizeImage(file: File, maxSize: number) {
     };
     reader.readAsDataURL(file);
   });
+}
+
+function readImageFiles(files: File[]) {
+  return Promise.all(files.map((file) => resizeImage(file, 1400)));
 }
 
 function getDistanceKm(from: UserLocation, to: Pick<Find, "lat" | "lng">) {
@@ -1036,6 +1373,15 @@ function isScanHistoryItem(item: unknown): item is ScanHistoryItem {
   return false;
 }
 
+function scanRowToHistoryItem(row: { id: number; type: string; title: string; subtitle: string; payload?: unknown }): ScanHistoryItem | null {
+  const payload = row.payload && typeof row.payload === "object" ? row.payload : {};
+  if (isScanHistoryItem(payload)) return { ...payload, id: row.id };
+  if (row.type === "product") return null;
+  if (row.type === "ingredients") return null;
+  if (row.type === "menu") return null;
+  return null;
+}
+
 function PricingScreen() {
   return (
     <>
@@ -1055,28 +1401,355 @@ function PricingScreen() {
   );
 }
 
-function ProfileScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen: Screen) => void; user: AuthUser | null; setUser: (user: AuthUser | null) => void; finds: Find[] }) {
+  const [profileName, setProfileName] = useState("");
+  const [email, setEmail] = useState(user?.email || "");
+  const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [message, setMessage] = useState("");
+  const [loadingAuth, setLoadingAuth] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [editProfileName, setEditProfileName] = useState(user ? getUserDisplayName(user) : "");
+  const [privacy, setPrivacy] = useState<ProfilePrivacy>(readProfilePrivacy);
+  const [remoteScans, setRemoteScans] = useState<ScanHistoryItem[]>([]);
+  const mySpotIds = readMySpotIds();
+  const mySpots = finds.filter((find) => find.createdBy === user?.id || mySpotIds.includes(find.id));
+  const totalConfirmations = mySpots.reduce((sum, find) => sum + (find.confirmations ?? 0), 0);
+  const scans = remoteScans.length > 0 ? remoteScans : readScanHistory();
+
+  useEffect(() => {
+    saveProfilePrivacy(privacy);
+    if (user) {
+      const payload: ProfilePayload = {
+        id: user.id,
+        profileName: getUserDisplayName(user),
+        ...privacy
+      };
+      void saveUserProfile(payload).catch(console.warn);
+    }
+  }, [privacy]);
+
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    void fetchProfile(user.id).then((profile) => {
+      if (!active || !profile) return;
+      setPrivacy({
+        publicSpots: profile.publicSpots,
+        publicScans: profile.publicScans,
+        publicComments: profile.publicComments
+      });
+    }).catch(console.warn);
+    void fetchScans(user.id).then((items) => {
+      if (!active) return;
+      setRemoteScans(items.map(scanRowToHistoryItem).filter(Boolean) as ScanHistoryItem[]);
+    }).catch(console.warn);
+    return () => {
+      active = false;
+    };
+  }, [user]);
+
+  async function login(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoadingAuth(true);
+    setMessage("");
+    try {
+      if (authMode === "register" && !profileName.trim()) {
+        setMessage("Bitte waehle einen Profilnamen.");
+        setLoadingAuth(false);
+        return;
+      }
+      const authUser = authMode === "login" ? await signInWithPassword(email, password) : await signUpWithPassword(email, password, profileName.trim());
+      if (authUser) setUser(authUser);
+      setMessage(authMode === "login" ? "Du bist eingeloggt." : "Account erstellt. Falls Supabase E-Mail-Bestaetigung verlangt, bitte Postfach pruefen.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Anmeldung gerade nicht moeglich.");
+    } finally {
+      setLoadingAuth(false);
+    }
+  }
+
+  async function socialLogin(provider: "google") {
+    setLoadingAuth(true);
+    setMessage("");
+    try {
+      await signInWithOAuth(provider);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `${provider} Login gerade nicht moeglich.`);
+      setLoadingAuth(false);
+    }
+  }
+
+  async function signOut() {
+    await logout();
+    setUser(null);
+    setMessage("Du bist abgemeldet.");
+  }
+
+  async function saveProfile() {
+    const nextName = editProfileName.trim();
+    if (!nextName) {
+      setMessage("Profilname darf nicht leer sein.");
+      return;
+    }
+    setLoadingAuth(true);
+    setMessage("");
+    try {
+      const updatedUser = await updateProfileName(nextName);
+      setUser(updatedUser);
+      await saveUserProfile({ id: updatedUser.id, profileName: nextName, ...privacy });
+      setEditingProfile(false);
+      setMessage("Profil aktualisiert.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Profil konnte nicht gespeichert werden.");
+    } finally {
+      setLoadingAuth(false);
+    }
+  }
+
   return (
     <>
-      <Header eyebrow="Profil" title="Optional anmelden" />
-      <section className="rounded-3xl bg-white p-5 shadow-soft">
-        <div className="grid size-12 place-items-center rounded-2xl bg-sage text-moss"><LogIn /></div>
-        <p className="mt-4 leading-7 text-ink/70">Du kannst die App ohne Account nutzen und Spots beitragen. Ein Login ist nur Komfort: eigene Spots verwalten, Lieblingsorte speichern, spaeter Sync und Benachrichtigungen.</p>
-        <div className="mt-5 flex flex-wrap gap-3">
-          <button className="rounded-2xl bg-moss px-5 py-3 font-bold text-white">Kostenlos anmelden</button>
-          <button onClick={() => setScreen("add")} className="rounded-2xl bg-sage px-5 py-3 font-bold text-moss">Ohne Login Spot teilen</button>
-        </div>
-      </section>
+      <Header eyebrow="Profil" title={user ? "Willkommen zurueck." : "Kostenlos anmelden"} />
+      {user ? (
+        <section className="space-y-4">
+          <div className="overflow-hidden rounded-3xl bg-ink text-white shadow-soft">
+            <div className="grid gap-5 p-6 md:grid-cols-[1fr_0.9fr] md:items-end">
+              <div>
+                <div className="grid size-16 place-items-center rounded-3xl bg-honey text-2xl font-black text-ink">{getUserDisplayName(user).slice(0, 1).toUpperCase()}</div>
+                <p className="mt-5 text-sm font-bold uppercase text-honey">Veggie Profil</p>
+                {editingProfile ? (
+                  <div className="mt-2 max-w-md">
+                    <label>
+                      <span className="text-sm font-bold text-white/70">Profilname</span>
+                      <input value={editProfileName} onChange={(event) => setEditProfileName(event.target.value)} className="mt-2 w-full rounded-2xl bg-white px-4 py-3 font-bold text-ink outline-none focus:ring-2 focus:ring-honey" />
+                    </label>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button onClick={() => void saveProfile()} disabled={loadingAuth} className="rounded-2xl bg-honey px-4 py-2 text-sm font-bold text-ink disabled:opacity-60">Speichern</button>
+                      <button onClick={() => { setEditingProfile(false); setEditProfileName(getUserDisplayName(user)); }} className="rounded-2xl bg-white/10 px-4 py-2 text-sm font-bold text-white">Abbrechen</button>
+                    </div>
+                  </div>
+                ) : (
+                  <h2 className="mt-1 break-all text-4xl font-bold">{getUserDisplayName(user)}</h2>
+                )}
+                <p className="mt-2 break-all text-sm font-semibold text-white/55">{user.email}</p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <ProfileStat label="Spots" value={String(mySpots.length)} />
+                <ProfileStat label="Bestaetigt" value={String(totalConfirmations)} />
+                <button onClick={() => { setEditingProfile(true); setEditProfileName(getUserDisplayName(user)); }} className="col-span-2 rounded-2xl bg-white/10 p-4 text-left font-bold text-white hover:bg-white/15">Profil bearbeiten</button>
+              </div>
+            </div>
+          </div>
+          <section className="grid gap-4 lg:grid-cols-[1fr_0.75fr]">
+            <div className="rounded-3xl bg-white p-5 shadow-soft">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-bold uppercase text-moss">Meine Beitraege</p>
+                  <h3 className="mt-1 text-2xl font-bold">Von dir hinzugefuegte Spots</h3>
+                </div>
+                <button onClick={() => setScreen("add")} className="rounded-2xl bg-moss px-4 py-3 text-sm font-bold text-white">Spot hinzufuegen</button>
+              </div>
+              <div className="mt-5 space-y-3">
+                {mySpots.map((spot) => <ProfileSpotCard key={spot.id} spot={spot} setScreen={setScreen} />)}
+                {mySpots.length === 0 && (
+                  <div className="rounded-3xl bg-cream p-6 text-center">
+                    <Store className="mx-auto text-moss" size={36} />
+                    <p className="mt-3 text-lg font-bold">Noch keine eigenen Spots</p>
+                    <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-ink/60">Fuege deinen ersten Fund hinzu. Danach erscheint er hier in deinem Profil.</p>
+                    <button onClick={() => setScreen("add")} className="mt-4 rounded-2xl bg-moss px-5 py-3 font-bold text-white">Ersten Spot teilen</button>
+                  </div>
+                )}
+              </div>
+            </div>
+            <aside className="space-y-4">
+              <div className="rounded-3xl bg-white p-5 shadow-soft">
+                <p className="text-sm font-bold uppercase text-moss">Privatsphaere</p>
+                <div className="mt-4 space-y-3">
+                  <PrivacyToggle label="Geteilte Spots oeffentlich" checked={privacy.publicSpots} onChange={(checked) => setPrivacy((current) => ({ ...current, publicSpots: checked }))} />
+                  <PrivacyToggle label="Scans oeffentlich" checked={privacy.publicScans} onChange={(checked) => setPrivacy((current) => ({ ...current, publicScans: checked }))} />
+                  <PrivacyToggle label="Kommentare oeffentlich" checked={privacy.publicComments} onChange={(checked) => setPrivacy((current) => ({ ...current, publicComments: checked }))} />
+                </div>
+                <p className="mt-3 text-xs leading-5 text-ink/50">Standard: Spots oeffentlich, Scans privat.</p>
+              </div>
+              <div className="rounded-3xl bg-white p-5 shadow-soft">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-bold uppercase text-moss">Meine Scans</p>
+                  <span className={`rounded-full px-3 py-1 text-xs font-bold ${privacy.publicScans ? "bg-sage text-moss" : "bg-cream text-ink/45"}`}>{privacy.publicScans ? "oeffentlich" : "privat"}</span>
+                </div>
+                <div className="mt-4 max-h-80 space-y-2 overflow-y-auto">
+                  {scans.map((scan) => <ProfileScanCard key={scan.id} scan={scan} />)}
+                  {scans.length === 0 && <p className="rounded-2xl bg-cream p-4 text-sm text-ink/60">Noch keine Scans gespeichert.</p>}
+                </div>
+              </div>
+              <div className="rounded-3xl bg-white p-5 shadow-soft">
+                <p className="text-sm font-bold uppercase text-moss">Profilvorteile</p>
+                <div className="mt-4 space-y-3 text-sm leading-6 text-ink/70">
+                  <p><b>Kommentieren:</b> Teile Updates und Tipps direkt unter Spots.</p>
+                  <p><b>Eigene Spots:</b> Deine Beitraege bleiben deinem Profil zugeordnet.</p>
+                  <p><b>Naechster Schritt:</b> Lieblingsspots und Sync koennen jetzt sauber an den Account gehangen werden.</p>
+                </div>
+              </div>
+              <div className="rounded-3xl bg-sage p-5">
+                <p className="font-bold text-moss">Account</p>
+                <p className="mt-2 text-sm leading-6 text-ink/65">Du bist eingeloggt und kannst Community-Funktionen nutzen.</p>
+                <button onClick={() => void signOut()} className="mt-4 rounded-2xl bg-white px-5 py-3 font-bold text-moss">Abmelden</button>
+              </div>
+            </aside>
+          </section>
+          {message && <p className="rounded-2xl bg-sage px-4 py-3 text-sm font-bold text-moss">{message}</p>}
+        </section>
+      ) : (
+        <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+          <div className="rounded-3xl bg-white p-5 shadow-soft">
+            <div className="grid size-12 place-items-center rounded-2xl bg-sage text-moss"><LogIn /></div>
+              <div className="mt-4 rounded-3xl bg-cream p-4">
+                <p className="text-sm font-bold uppercase text-moss">Dein Veggie Profil</p>
+                <p className="mt-2 leading-7 text-ink/70">Melde dich mit Google oder E-Mail an. Du kannst weiter ohne Account nutzen, aber Kommentare, Lieblingsspots und spaetere Sync-Funktionen gehoeren zu deinem Profil.</p>
+              </div>
+              {!authConfigured && <p className="mt-4 rounded-2xl bg-tomato px-4 py-3 text-sm font-bold text-white">Supabase Auth fehlt noch: Setze `VITE_SUPABASE_URL` und `VITE_SUPABASE_ANON_KEY`.</p>}
+              <button type="button" onClick={() => void socialLogin("google")} disabled={loadingAuth || !authConfigured} className="mt-5 flex w-full items-center justify-center gap-3 rounded-2xl border border-oat bg-white px-5 py-4 font-bold text-ink shadow-sm transition hover:bg-cream disabled:opacity-60">
+                <GoogleLogo /> Mit Google anmelden
+              </button>
+              <div className="my-5 flex items-center gap-3 text-xs font-bold uppercase text-ink/40">
+                <span className="h-px flex-1 bg-oat" />
+                oder mit E-Mail
+                <span className="h-px flex-1 bg-oat" />
+              </div>
+              <div className="grid grid-cols-2 gap-2 rounded-3xl bg-cream p-2">
+                <button type="button" onClick={() => setAuthMode("login")} className={`rounded-2xl px-4 py-3 text-sm font-bold ${authMode === "login" ? "bg-moss text-white" : "bg-white text-ink/65"}`}>Anmelden</button>
+                <button type="button" onClick={() => setAuthMode("register")} className={`rounded-2xl px-4 py-3 text-sm font-bold ${authMode === "register" ? "bg-moss text-white" : "bg-white text-ink/65"}`}>Registrieren</button>
+              </div>
+              <form onSubmit={login} className="mt-5 space-y-3">
+                {authMode === "register" && (
+                  <label>
+                    <span className="font-bold">Profilname</span>
+                    <input value={profileName} onChange={(event) => setProfileName(event.target.value)} required={authMode === "register"} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="z.B. VeggieNils" />
+                  </label>
+                )}
+                <label>
+                  <span className="font-bold">E-Mail</span>
+                  <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="du@example.com" />
+                </label>
+                <label>
+                  <span className="font-bold">Passwort</span>
+                  <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required minLength={6} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="Mindestens 6 Zeichen" />
+                </label>
+                <button disabled={loadingAuth || !authConfigured} className="w-full rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft disabled:opacity-60">{loadingAuth ? "Bitte warten..." : authMode === "login" ? "Mit E-Mail anmelden" : "Account erstellen"}</button>
+                <button type="button" onClick={() => setScreen("add")} className="w-full rounded-2xl bg-sage px-5 py-3 font-bold text-moss">Ohne Login Spot teilen</button>
+              </form>
+            {message && <p className="mt-4 rounded-2xl bg-sage px-4 py-3 text-sm font-bold text-moss">{message}</p>}
+          </div>
+          <div className="rounded-3xl bg-ink p-5 text-white shadow-soft">
+            <h2 className="text-2xl font-bold">Mit Login bekommst du mehr Kontrolle.</h2>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              {[
+                ["Kommentieren", "Tipps, Fragen und Updates direkt an Spots schreiben."],
+                ["Lieblingsspots", "Orte merken und spaeter schneller wiederfinden."],
+                ["Eigene Beitraege", "Deine Spots spaeter bearbeiten oder aktualisieren."],
+                ["Scan-Verlauf Sync", "Letzte Scans langfristig mit deinem Account sichern."],
+                ["Preis-Alerts", "Benachrichtigung, wenn ein Produkt in deiner Naehe guenstiger auftaucht."],
+                ["Vertrauen", "Bestaetigungen von echten Profilen werden nuetzlicher fuer alle."]
+              ].map(([title, text]) => (
+                <div key={title} className="rounded-2xl bg-white/10 p-4">
+                  <p className="font-bold text-honey">{title}</p>
+                  <p className="mt-2 text-sm leading-6 text-white/75">{text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
     </>
+  );
+}
+
+function ProfileStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl bg-white/10 p-4">
+      <span className="block text-xs font-bold uppercase text-white/50">{label}</span>
+      <b className="mt-1 block text-2xl text-honey">{value}</b>
+    </div>
+  );
+}
+
+function ProfileSpotCard({ spot, setScreen }: { spot: Find; setScreen?: (screen: Screen) => void }) {
+  return (
+    <article className="flex gap-4 rounded-3xl bg-cream p-4">
+      <div className="grid size-20 shrink-0 place-items-center overflow-hidden rounded-2xl bg-oat text-moss">
+        {spot.imageDataUrl ? <img src={spot.imageDataUrl} alt="" className="h-full w-full object-cover" /> : <FindIcon category={spot.category} size={28} />}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h4 className="font-bold">{spot.name}</h4>
+            <p className="mt-1 text-sm text-ink/55">{spot.place}</p>
+          </div>
+          <Badge status={spot.status} />
+        </div>
+        <p className="mt-2 max-h-12 overflow-hidden text-sm leading-6 text-ink/70">{spot.description}</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-moss">{spot.price}</span>
+          <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-ink/50">{spot.confirmations ?? 0} bestaetigt</span>
+          {setScreen && <button onClick={() => setScreen("map")} className="rounded-full bg-moss px-3 py-1 text-xs font-bold text-white">Auf Karte ansehen</button>}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function ProfileScanCard({ scan }: { scan: ScanHistoryItem }) {
+  return (
+    <div className="flex items-center gap-3 rounded-2xl bg-cream p-3 text-sm">
+      {"photo" in scan && <img src={scan.photo} alt="" className="size-12 shrink-0 rounded-xl object-cover" />}
+      {scan.type === "product" && scan.product.imageUrl && <img src={scan.product.imageUrl} alt="" className="size-12 shrink-0 rounded-xl bg-white object-contain p-1" />}
+      {scan.type === "product" && !scan.product.imageUrl && <span className="grid size-12 shrink-0 place-items-center rounded-xl bg-sage text-moss"><ScanLine size={18} /></span>}
+      <div className="min-w-0">
+        <b className="block truncate">{scan.title}</b>
+        <span className="mt-1 block truncate text-xs text-ink/55">{scan.subtitle}</span>
+      </div>
+    </div>
+  );
+}
+
+function PrivacyToggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="flex items-center justify-between gap-3 rounded-2xl bg-cream p-3">
+      <span className="text-sm font-bold">{label}</span>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="size-5 accent-moss" />
+    </label>
+  );
+}
+
+function GoogleLogo() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-5" aria-hidden="true">
+      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+      <path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.84z" />
+      <path fill="#EA4335" d="M12 5.37c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06L5.84 9.9C6.71 7.3 9.14 5.37 12 5.37z" />
+    </svg>
   );
 }
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [finds, setFinds] = useState<Find[]>(() => {
     const confirmedIds = readConfirmedSpotIds();
     return initialFinds.map((find) => ({ ...find, confirmations: 0, viewerConfirmed: confirmedIds.includes(find.id) }));
   });
+
+  useEffect(() => {
+    let active = true;
+    void getCurrentUser().then((currentUser) => {
+      if (active) setUser(currentUser);
+    });
+    const unsubscribe = onAuthChange((currentUser) => setUser(currentUser));
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1097,6 +1770,7 @@ export default function App() {
 
   const addFind = async (find: CommunitySpotPayload) => {
     const saved = await saveCommunitySpot(find);
+    saveMySpotId(saved.id);
     setFinds((current) => [{ ...saved, viewerConfirmed: false }, ...current]);
   };
 
@@ -1114,11 +1788,11 @@ export default function App() {
   return (
     <Shell screen={screen} setScreen={setScreen}>
       {screen === "home" && <HomeScreen setScreen={setScreen} />}
-      {screen === "scanner" && <ScannerScreen />}
-      {screen === "map" && <MapScreen finds={finds} setScreen={setScreen} confirmFind={confirmFind} />}
-      {screen === "add" && <AddFindScreen addFind={addFind} setScreen={setScreen} />}
+      {screen === "scanner" && <ScannerScreen user={user} />}
+      {screen === "map" && <MapScreen finds={finds} setScreen={setScreen} confirmFind={confirmFind} user={user} />}
+      {screen === "add" && <AddFindScreen addFind={addFind} setScreen={setScreen} user={user} />}
       {screen === "pricing" && <PricingScreen />}
-      {screen === "profile" && <ProfileScreen setScreen={setScreen} />}
+      {screen === "profile" && <ProfileScreen setScreen={setScreen} user={user} setUser={setUser} finds={finds} />}
     </Shell>
   );
 }
@@ -1130,4 +1804,66 @@ function readConfirmedSpotIds() {
   } catch {
     return [];
   }
+}
+
+function readMySpotIds() {
+  try {
+    const value = localStorage.getItem("veggie-navigator-my-spot-ids");
+    const ids = value ? JSON.parse(value) : [];
+    return Array.isArray(ids) ? ids.filter((id) => typeof id === "number") : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveMySpotId(id: number) {
+  const ids = Array.from(new Set([id, ...readMySpotIds()]));
+  localStorage.setItem("veggie-navigator-my-spot-ids", JSON.stringify(ids));
+}
+
+function readProfilePrivacy(): ProfilePrivacy {
+  try {
+    const value = localStorage.getItem(PROFILE_PRIVACY_STORAGE_KEY);
+    const parsed = value ? JSON.parse(value) : {};
+    return {
+      publicSpots: typeof parsed.publicSpots === "boolean" ? parsed.publicSpots : true,
+      publicScans: typeof parsed.publicScans === "boolean" ? parsed.publicScans : false,
+      publicComments: typeof parsed.publicComments === "boolean" ? parsed.publicComments : true
+    };
+  } catch {
+    return { publicSpots: true, publicScans: false, publicComments: true };
+  }
+}
+
+function saveProfilePrivacy(privacy: ProfilePrivacy) {
+  localStorage.setItem(PROFILE_PRIVACY_STORAGE_KEY, JSON.stringify(privacy));
+}
+
+function readSpotComments(spotId: number): SpotComment[] {
+  try {
+    const value = localStorage.getItem(`veggie-navigator-spot-comments-${spotId}`);
+    const comments = value ? JSON.parse(value) : [];
+    return Array.isArray(comments) ? comments.filter(isSpotComment) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSpotComments(spotId: number, comments: SpotComment[]) {
+  localStorage.setItem(`veggie-navigator-spot-comments-${spotId}`, JSON.stringify(comments));
+}
+
+function isSpotComment(comment: unknown): comment is SpotComment {
+  if (!comment || typeof comment !== "object") return false;
+  const value = comment as Partial<SpotComment>;
+  return typeof value.id === "number" && typeof value.author === "string" && typeof value.text === "string" && typeof value.createdAt === "string";
+}
+
+function formatCommentDate(value: string) {
+  return new Date(value).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "2-digit" });
+}
+
+function getUserDisplayName(user: AuthUser) {
+  const metadata = user.user_metadata || {};
+  return String(metadata.profile_name || metadata.full_name || metadata.name || user.email || "Veggie Nutzer");
 }

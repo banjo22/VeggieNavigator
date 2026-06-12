@@ -20,11 +20,12 @@ export type CommunitySpot = {
   status: VeggieStatus;
   category: string;
   confirmed: string;
-  rating: string;
   lat: number;
   lng: number;
   description: string;
   imageDataUrl?: string;
+  createdBy?: string;
+  createdByName?: string;
 };
 
 export const initialFinds: CommunitySpot[] = [];

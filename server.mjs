@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { confirmCommunitySpot, createCommunitySpot, listCommunitySpots } from "./lib/community-spots.js";
+import { createComment, createScan, getProfile, listComments, listScans, upsertProfile } from "./lib/user-activity.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const ROOT = resolve(".");
@@ -33,6 +34,9 @@ createServer(async (req, res) => {
     if (url.pathname === "/api/places") return getPlaces(req, res, url);
     if (url.pathname === "/api/community-spots") return communitySpots(req, res);
     if (url.pathname === "/api/community-spots/confirm") return confirmSpot(req, res);
+    if (url.pathname === "/api/profile") return profile(req, res, url);
+    if (url.pathname === "/api/scans") return scans(req, res, url);
+    if (url.pathname === "/api/comments") return comments(req, res, url);
     if (url.pathname === "/api/analyze-ingredients") return analyzeIngredients(req, res);
     return serveStatic(res, url.pathname);
   } catch (error) {
@@ -92,6 +96,36 @@ async function confirmSpot(req, res) {
   if (!body.id) return sendJson(res, 400, { error: "id missing" });
   const item = await confirmCommunitySpot(body.id);
   return sendJson(res, 200, { item });
+}
+
+async function profile(req, res, url) {
+  if (req.method === "GET") {
+    const userId = url.searchParams.get("userId")?.trim();
+    if (!userId) return sendJson(res, 400, { error: "userId missing" });
+    return sendJson(res, 200, { profile: await getProfile(userId) });
+  }
+  if (req.method === "POST") return sendJson(res, 200, { profile: await upsertProfile(await readBody(req)) });
+  return sendJson(res, 405, { error: "GET or POST required" });
+}
+
+async function scans(req, res, url) {
+  if (req.method === "GET") {
+    const userId = url.searchParams.get("userId")?.trim();
+    if (!userId) return sendJson(res, 400, { error: "userId missing" });
+    return sendJson(res, 200, { items: await listScans(userId) });
+  }
+  if (req.method === "POST") return sendJson(res, 201, { item: await createScan(await readBody(req)) });
+  return sendJson(res, 405, { error: "GET or POST required" });
+}
+
+async function comments(req, res, url) {
+  if (req.method === "GET") {
+    const spotId = url.searchParams.get("spotId")?.trim();
+    if (!spotId) return sendJson(res, 400, { error: "spotId missing" });
+    return sendJson(res, 200, { items: await listComments(spotId) });
+  }
+  if (req.method === "POST") return sendJson(res, 201, { item: await createComment(await readBody(req)) });
+  return sendJson(res, 405, { error: "GET or POST required" });
 }
 
 async function getPlaces(_req, res, url) {
@@ -188,12 +222,15 @@ async function analyzeIngredients(req, res) {
     return sendJson(res, 501, { error: "OPENAI_API_KEY fehlt. Lege ihn in der Umgebung an und starte den API-Server neu." });
   }
 
-  const { imageDataUrl, mode = "ingredients" } = await readBody(req);
-  if (!imageDataUrl) return sendJson(res, 400, { error: "imageDataUrl missing" });
+  const { imageDataUrl, imageDataUrls, mode = "ingredients" } = await readBody(req);
   const isMenu = mode === "menu";
+  const images = isMenu ? normalizeImages(imageDataUrls || imageDataUrl) : normalizeImages(imageDataUrl).slice(0, 1);
+  if (images.length === 0) return sendJson(res, 400, { error: "Bitte lade mindestens ein Bild hoch oder fotografiere eine Seite." });
   const prompt = isMenu
     ? [
-        "Analysiere ausschliesslich die sichtbare Speisekarte im Bild. Erfinde keine Gerichte.",
+        "Analysiere ausschliesslich die sichtbare Speisekarte in allen Bildern. Die Bilder koennen mehrere Seiten derselben Speisekarte sein.",
+        "Fasse die Seiten zusammen und vermeide doppelte Gerichte.",
+        "Erfinde keine Gerichte.",
         "Wenn ein Gericht nicht lesbar ist, lass es weg.",
         "Wenn vor einem Gericht eine Nummer steht, uebernimm die Nummer zur Orientierung, z.B. '12 Pasta Arrabbiata'.",
         "Gib nur kurzen deutschen Plain-Text aus, keine JSON, kein {}, keine Einleitung.",
@@ -225,7 +262,7 @@ async function analyzeIngredients(req, res) {
             type: "input_text",
             text: prompt
           },
-          { type: "input_image", image_url: imageDataUrl }
+          ...images.map((image) => ({ type: "input_image", image_url: image }))
         ]
       }]
     })
@@ -282,6 +319,16 @@ function safeJson(text) {
       confidence: 0
     };
   }
+}
+
+function normalizeImages(value) {
+  if (Array.isArray(value)) return value.filter(isImageInput).slice(0, 8);
+  if (isImageInput(value)) return [value];
+  return [];
+}
+
+function isImageInput(value) {
+  return typeof value === "string" && (value.startsWith("data:image/") || value.startsWith("https://") || value.startsWith("http://"));
 }
 
 function extractResponseText(data) {

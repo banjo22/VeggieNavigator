@@ -11,13 +11,16 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { imageDataUrl, mode = "ingredients" } = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-    if (!imageDataUrl) return res.status(400).json({ error: "imageDataUrl missing" });
-
+    const { imageDataUrl, imageDataUrls, mode = "ingredients" } = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     const isMenu = mode === "menu";
+    const images = isMenu ? normalizeImages(imageDataUrls || imageDataUrl) : normalizeImages(imageDataUrl).slice(0, 1);
+    if (images.length === 0) return res.status(400).json({ error: "Bitte lade mindestens ein Bild hoch oder fotografiere eine Seite." });
+
     const prompt = isMenu
       ? [
-          "Analysiere ausschliesslich die sichtbare Speisekarte im Bild. Erfinde keine Gerichte.",
+          "Analysiere ausschliesslich die sichtbare Speisekarte in allen Bildern. Die Bilder koennen mehrere Seiten derselben Speisekarte sein.",
+          "Fasse die Seiten zusammen und vermeide doppelte Gerichte.",
+          "Erfinde keine Gerichte.",
           "Wenn ein Gericht nicht lesbar ist, lass es weg.",
           "Wenn vor einem Gericht eine Nummer steht, uebernimm die Nummer zur Orientierung, z.B. '12 Pasta Arrabbiata'.",
           "Gib nur kurzen deutschen Plain-Text aus, keine JSON, kein {}, keine Einleitung.",
@@ -46,7 +49,7 @@ export default async function handler(req, res) {
           role: "user",
           content: [
             { type: "input_text", text: prompt },
-            { type: "input_image", image_url: imageDataUrl }
+            ...images.map((image) => ({ type: "input_image", image_url: image }))
           ]
         }]
       })
@@ -78,6 +81,16 @@ function safeJson(text) {
       confidence: 0
     };
   }
+}
+
+function normalizeImages(value) {
+  if (Array.isArray(value)) return value.filter(isImageInput).slice(0, 8);
+  if (isImageInput(value)) return [value];
+  return [];
+}
+
+function isImageInput(value) {
+  return typeof value === "string" && (value.startsWith("data:image/") || value.startsWith("https://") || value.startsWith("http://"));
 }
 
 function extractResponseText(data) {
