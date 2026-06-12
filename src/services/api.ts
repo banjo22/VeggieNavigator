@@ -31,6 +31,7 @@ export type CommunitySpotPayload = {
   lat: number;
   lng: number;
   description: string;
+  imageDataUrl?: string;
 };
 
 export type IngredientAnalysis = {

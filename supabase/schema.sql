@@ -9,6 +9,7 @@ create table if not exists public.community_spots (
   lat double precision not null,
   lng double precision not null,
   description text not null,
+  image_data_url text,
   confirmations integer not null default 0,
   confirmed_at timestamptz default now(),
   created_at timestamptz not null default now()

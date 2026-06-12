@@ -24,6 +24,7 @@ export type CommunitySpot = {
   lat: number;
   lng: number;
   description: string;
+  imageDataUrl?: string;
 };
 
 export const initialFinds: CommunitySpot[] = [];

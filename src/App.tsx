@@ -1,4 +1,4 @@
-import { Camera, Check, Coffee, Crown, Home, Loader2, LogIn, MapPinned, MenuSquare, Plus, ScanLine, Search, ShoppingBag, Sparkles, Star, Store, UploadCloud, Utensils, UserRound } from "lucide-react";
+import { Camera, Check, Coffee, Crown, Home, Loader2, LogIn, MapPinned, MenuSquare, Plus, ScanLine, Search, ShoppingBag, Sparkles, Star, Store, Trash2, UploadCloud, Utensils, UserRound, X } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import {
@@ -28,6 +28,14 @@ import { fetchProductByBarcode, type ProductResult } from "./services/openFoodFa
 type Screen = "home" | "scanner" | "map" | "add" | "pricing" | "profile";
 type Find = CommunitySpot & { confirmations?: number; viewerConfirmed?: boolean };
 type BarcodeResult = { rawValue: string };
+type UserLocation = { lat: number; lng: number };
+type ScanHistoryItem =
+  | { id: number; type: "product"; title: string; subtitle: string; barcode: string; product: ProductResult }
+  | { id: number; type: "ingredients"; title: string; subtitle: string; photo: string; analysis: IngredientAnalysis }
+  | { id: number; type: "menu"; title: string; subtitle: string; photo: string; text: string };
+
+const SCAN_HISTORY_STORAGE_KEY = "veggie-navigator-scan-history";
+const SCAN_HISTORY_LIMIT = 10;
 
 declare global {
   interface Window {
@@ -177,6 +185,7 @@ function ScannerScreen() {
   const [ingredientPhoto, setIngredientPhoto] = useState("");
   const [ingredientMessage, setIngredientMessage] = useState("");
   const [menuMessage, setMenuMessage] = useState("");
+  const [scanHistory, setScanHistory] = useState<ScanHistoryItem[]>(readScanHistory);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -203,6 +212,10 @@ function ScannerScreen() {
     });
   }, [photoCameraActive, scanMode]);
 
+  useEffect(() => {
+    localStorage.setItem(SCAN_HISTORY_STORAGE_KEY, JSON.stringify(scanHistory.slice(0, SCAN_HISTORY_LIMIT)));
+  }, [scanHistory]);
+
   async function scanProduct(code = barcode) {
     const cleanedCode = code.trim();
     if (!cleanedCode) {
@@ -217,6 +230,14 @@ function ScannerScreen() {
       const result = await fetchProductByBarcode(cleanedCode);
       if (result) {
         setProduct(result);
+        addScanHistory({
+          id: Date.now(),
+          type: "product",
+          title: result.name,
+          subtitle: `${result.status} - ${cleanedCode}`,
+          barcode: cleanedCode,
+          product: result
+        });
         void loadPrices(cleanedCode);
       } else {
         setIngredientMessage("Kein Open-Food-Facts-Eintrag gefunden. In so einem Fall waere ein Zutatenfoto besser.");
@@ -364,6 +385,14 @@ function ScannerScreen() {
     try {
       const result = await analyzeIngredientPhoto(imageDataUrl, controller.signal);
       setAnalysis(result);
+      addScanHistory({
+        id: Date.now(),
+        type: "ingredients",
+        title: `Zutaten: ${result.status}`,
+        subtitle: result.explanation.slice(0, 72),
+        photo: imageDataUrl,
+        analysis: result
+      });
       setIngredientMessage("Zutatenliste wurde per KI analysiert.");
     } catch (error) {
       setIngredientMessage(error instanceof DOMException && error.name === "AbortError" ? "Analyse abgebrochen oder Timeout." : error instanceof Error ? error.message : "KI-Analyse nicht erreichbar.");
@@ -387,6 +416,14 @@ function ScannerScreen() {
     try {
       const result = await analyzeMenuPhoto(imageDataUrl, controller.signal);
       setMenuText(result);
+      addScanHistory({
+        id: Date.now(),
+        type: "menu",
+        title: "Speisekarte",
+        subtitle: result.split("\n").find(Boolean)?.slice(0, 72) || "Analyse gespeichert",
+        photo: imageDataUrl,
+        text: result
+      });
       setMenuLoading(false);
       setMenuMessage("Speisekarte analysiert.");
     } catch (error) {
@@ -440,13 +477,45 @@ function ScannerScreen() {
     setMenuLoading(false);
   }
 
+  function addScanHistory(item: ScanHistoryItem) {
+    setScanHistory((current) => [item, ...current.filter((entry) => getScanHistoryKey(entry) !== getScanHistoryKey(item))].slice(0, SCAN_HISTORY_LIMIT));
+  }
+
+  function restoreScan(item: ScanHistoryItem) {
+    resetCurrentScan();
+    if (item.type === "product") {
+      setScanMode("ingredients");
+      setBarcode(item.barcode);
+      setProduct(item.product);
+      void loadPrices(item.barcode);
+      return;
+    }
+    if (item.type === "ingredients") {
+      setScanMode("ingredients");
+      setIngredientPhoto(item.photo);
+      setAnalysis(item.analysis);
+      return;
+    }
+    setScanMode("menu");
+    setMenuPhoto(item.photo);
+    setMenuText(item.text);
+  }
+
+  function deleteScanHistoryItem(id: number) {
+    setScanHistory((current) => current.filter((item) => item.id !== id));
+  }
+
+  function clearScanHistory() {
+    setScanHistory([]);
+  }
+
   const hasCurrentScan = scanMode === "ingredients" ? Boolean(ingredientPhoto || analysis || analysisLoading) : Boolean(menuPhoto || menuText || menuLoading);
 
   return (
     <>
       <Header eyebrow="Scanner" title="Was willst du scannen?" />
-      <div className="grid gap-4 lg:grid-cols-[1fr_0.85fr]">
-        <section className="rounded-3xl bg-white p-5 shadow-soft">
+      <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.85fr)]">
+        <section className="min-w-0 rounded-3xl bg-white p-5 shadow-soft">
           <div className="mb-4 grid grid-cols-2 gap-2 rounded-3xl bg-cream p-2">
             <button onClick={() => setScanMode("ingredients")} className={`rounded-2xl px-4 py-3 text-sm font-bold ${scanMode === "ingredients" ? "bg-moss text-white" : "bg-white text-ink/65"}`}>Zutaten</button>
             <button onClick={() => setScanMode("menu")} className={`rounded-2xl px-4 py-3 text-sm font-bold ${scanMode === "menu" ? "bg-moss text-white" : "bg-white text-ink/65"}`}>Speisekarte</button>
@@ -498,30 +567,37 @@ function ScannerScreen() {
             {scanMode === "menu" && menuMessage && <p className="mt-3 text-sm font-semibold text-tomato">{menuMessage}</p>}
           </div>
         </section>
-        <section className="rounded-3xl bg-white p-5 shadow-soft">
-          {scanMode === "ingredients" && product ? <ProductResultCard product={product} prices={prices} pricesLoading={pricesLoading} /> : (
-            <div className="grid h-full min-h-72 place-items-center rounded-3xl bg-cream p-6 text-center">
-              <div>
-                <p className="text-lg font-bold">{scanMode === "ingredients" ? "Noch kein Produkt geprueft" : "Speisekarten-Check"}</p>
-                <p className="mt-2 text-sm leading-6 text-ink/60">{scanMode === "ingredients" ? "Scanne Barcode oder Zutatenfoto." : "Lade eine Speisekarte hoch. Ergebnis: 3 klare Listen."}</p>
+        <section className="flex max-h-[calc(100vh-8rem)] min-w-0 max-w-full flex-col gap-4 overflow-hidden rounded-3xl bg-white p-5 shadow-soft">
+          <div className="min-h-0 min-w-0 shrink overflow-y-auto pr-1">
+            {scanMode === "ingredients" && product ? <ProductResultCard product={product} prices={prices} pricesLoading={pricesLoading} compact /> : scanMode === "ingredients" && analysis ? (
+              <AnalysisBox title="Aktuelles Zutaten-Ergebnis" badge={analysis.status}><p>{analysis.explanation}</p></AnalysisBox>
+            ) : scanMode === "menu" && menuText ? (
+              <AnalysisBox title="Aktuelle Speisekarte"><p className="whitespace-pre-wrap">{menuText}</p></AnalysisBox>
+            ) : (
+              <div className="grid min-h-48 place-items-center rounded-3xl bg-cream p-6 text-center">
+                <div>
+                  <p className="text-lg font-bold">{scanMode === "ingredients" ? "Noch kein Produkt geprueft" : "Speisekarten-Check"}</p>
+                  <p className="mt-2 text-sm leading-6 text-ink/60">{scanMode === "ingredients" ? "Scanne Barcode oder Zutatenfoto." : "Lade eine Speisekarte hoch. Ergebnis: 3 klare Listen."}</p>
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+          <ScanHistoryList items={scanHistory} restoreScan={restoreScan} deleteItem={deleteScanHistoryItem} clearItems={clearScanHistory} />
         </section>
       </div>
     </>
   );
 }
 
-function ProductResultCard({ product, prices, pricesLoading }: { product: ProductResult; prices: PriceOption[]; pricesLoading: boolean }) {
+function ProductResultCard({ product, prices, pricesLoading, compact = false }: { product: ProductResult; prices: PriceOption[]; pricesLoading: boolean; compact?: boolean }) {
   return (
     <div>
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-2xl font-bold">{product.name}</h2>
+        <h2 className={`${compact ? "text-xl" : "text-2xl"} font-bold`}>{product.name}</h2>
         <Badge status={product.status} />
       </div>
       <p className="mt-2 text-sm font-semibold text-moss">Quelle: {product.source}</p>
-      <p className="mt-3 leading-7 text-ink/70">{product.reason}</p>
+      <p className={`${compact ? "max-h-20 overflow-hidden text-sm leading-6" : "leading-7"} mt-3 text-ink/70`}>{product.reason}</p>
       {product.imageUrl && <img src={product.imageUrl} alt={product.name} className="mt-4 h-32 rounded-2xl bg-cream object-contain p-3" />}
       <div className="mt-4 flex flex-wrap gap-2">
         {product.ingredients.map((item) => (
@@ -558,6 +634,40 @@ function ProductResultCard({ product, prices, pricesLoading }: { product: Produc
   );
 }
 
+function ScanHistoryList({ items, restoreScan, deleteItem, clearItems }: { items: ScanHistoryItem[]; restoreScan: (item: ScanHistoryItem) => void; deleteItem: (id: number) => void; clearItems: () => void }) {
+  return (
+    <div className="min-h-0 min-w-0 max-w-full overflow-hidden rounded-3xl bg-cream p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="font-bold">Letzte Scans</h2>
+        {items.length > 0 && (
+          <button onClick={clearItems} className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-2 text-xs font-bold text-tomato">
+            <Trash2 size={14} /> Alle
+          </button>
+        )}
+      </div>
+      {items.length === 0 && <p className="mt-2 text-sm leading-6 text-ink/60">Hier erscheinen deine letzten Produkt-, Zutaten- und Speisekartenchecks.</p>}
+      <div className="mt-3 max-h-80 max-w-full space-y-2 overflow-y-auto overflow-x-hidden pr-1">
+        {items.map((item) => (
+          <div key={item.id} className="flex min-w-0 max-w-full items-center gap-2 rounded-2xl bg-white p-2 text-sm">
+            <button onClick={() => restoreScan(item)} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-1 text-left hover:bg-sage">
+              {"photo" in item && <img src={item.photo} alt="" className="size-12 shrink-0 rounded-xl object-cover" />}
+              {item.type === "product" && item.product.imageUrl && <img src={item.product.imageUrl} alt="" className="size-12 shrink-0 rounded-xl bg-cream object-contain p-1" />}
+              {item.type === "product" && !item.product.imageUrl && <span className="grid size-12 shrink-0 place-items-center rounded-xl bg-sage text-moss"><ScanLine size={18} /></span>}
+              <span className="min-w-0">
+                <b className="block max-w-full truncate">{item.title}</b>
+                <span className="mt-1 block max-w-full truncate text-xs text-ink/55">{item.subtitle}</span>
+              </span>
+            </button>
+            <button onClick={() => deleteItem(item.id)} className="grid size-9 shrink-0 place-items-center rounded-full bg-cream text-ink/55 hover:bg-tomato hover:text-white" aria-label="Scan loeschen">
+              <X size={16} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LoadingAnalysis({ label, onCancel }: { label: string; onCancel: () => void }) {
   return (
     <div className="mt-4 flex items-center justify-between gap-3 rounded-3xl bg-white p-4 text-left">
@@ -585,12 +695,34 @@ function AnalysisBox({ title, badge, children }: { title: string; badge?: string
 function MapScreen({ finds, setScreen, confirmFind }: { finds: Find[]; setScreen: (screen: Screen) => void; confirmFind: (id: number) => void }) {
   const [active, setActive] = useState(categories[0]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [userLocation, setUserLocation] = useState<UserLocation | null>(null);
+  const [locationMessage, setLocationMessage] = useState("");
   const visible = active === categories[0] ? finds : finds.filter((find) => find.category === active);
-  const mappable = visible.filter((find) => Number.isFinite(find.lat) && Number.isFinite(find.lng));
-  const selected = visible.find((find) => find.id === selectedId) ?? mappable[0] ?? visible[0] ?? null;
+  const displayFinds = userLocation
+    ? [...visible].sort((a, b) => getDistanceKm(userLocation, a) - getDistanceKm(userLocation, b)).map((find) => ({ ...find, distance: formatDistance(getDistanceKm(userLocation, find)) }))
+    : visible;
+  const mappable = displayFinds.filter((find) => Number.isFinite(find.lat) && Number.isFinite(find.lng));
+  const selected = displayFinds.find((find) => find.id === selectedId) ?? mappable[0] ?? displayFinds[0] ?? null;
   const center = selected && Number.isFinite(selected.lat) && Number.isFinite(selected.lng) ? selected : mappable[0] ?? null;
   const bbox = mappable.length > 0 ? getMapBounds(mappable) : null;
   const mapUrl = bbox ? `https://www.openstreetmap.org/export/embed.html?bbox=${bbox.minLng}%2C${bbox.minLat}%2C${bbox.maxLng}%2C${bbox.maxLat}&layer=mapnik` : "";
+
+  function findNearby() {
+    if (!navigator.geolocation) {
+      setLocationMessage("Dein Browser kann keinen Standort liefern.");
+      return;
+    }
+    setLocationMessage("Standort wird abgefragt...");
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setUserLocation({ lat: position.coords.latitude, lng: position.coords.longitude });
+        setActive(categories[0]);
+        setLocationMessage("Spots nach Entfernung sortiert.");
+      },
+      () => setLocationMessage("Standortfreigabe wurde nicht erlaubt oder ist nicht verfuegbar."),
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }
 
   return (
     <>
@@ -599,6 +731,11 @@ function MapScreen({ finds, setScreen, confirmFind }: { finds: Find[]; setScreen
         <span className="grid size-12 place-items-center rounded-2xl bg-white text-moss"><Plus /></span>
         <span><span className="block text-xl font-bold">Spot hinzufuegen</span><span className="text-sm text-white/80">Gerade etwas Gutes entdeckt? Teile es ohne Anmeldung.</span></span>
       </button>
+      <div className="mb-4 flex flex-wrap items-center gap-3 rounded-3xl bg-white p-3 shadow-soft">
+        <button onClick={findNearby} className="rounded-2xl bg-moss px-4 py-3 text-sm font-bold text-white">Spots in meiner Naehe</button>
+        {userLocation && <button onClick={() => { setUserLocation(null); setLocationMessage(""); }} className="rounded-2xl bg-cream px-4 py-3 text-sm font-bold text-moss">Sortierung zuruecksetzen</button>}
+        {locationMessage && <span className="text-sm font-semibold text-ink/60">{locationMessage}</span>}
+      </div>
       <div className="mb-4 flex gap-2 overflow-x-auto pb-2">
         {categories.map((category) => <button key={category} onClick={() => setActive(category)} className={`shrink-0 rounded-full px-4 py-2 text-sm font-bold ${active === category ? "bg-moss text-white" : "bg-white"}`}>{category}</button>)}
       </div>
@@ -607,12 +744,12 @@ function MapScreen({ finds, setScreen, confirmFind }: { finds: Find[]; setScreen
           {bbox && center ? (
             <>
               <iframe title="OpenStreetMap Karte" src={mapUrl} className="absolute inset-0 h-full w-full border-0" loading="lazy" />
-              <div className="absolute inset-0">
+              <div className="pointer-events-none absolute inset-0">
                 {mappable.map((find) => {
                   const position = getMarkerPosition(find, bbox);
                   const isSelected = find.id === selected?.id;
                   return (
-                    <button key={find.id} onClick={() => setSelectedId(find.id)} className={`absolute grid -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full text-white shadow-soft ring-4 ring-white/85 transition ${isSelected ? "size-14 bg-tomato" : "size-11 bg-moss hover:scale-105"}`} style={{ left: `${position.left}%`, top: `${position.top}%` }} aria-label={`${find.name} auswaehlen`}>
+                    <button key={find.id} onClick={() => setSelectedId(find.id)} className={`pointer-events-auto absolute grid -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full text-white shadow-soft ring-4 ring-white/85 transition ${isSelected ? "size-14 bg-tomato" : "size-11 bg-moss hover:scale-105"}`} style={{ left: `${position.left}%`, top: `${position.top}%` }} aria-label={`${find.name} auswaehlen`}>
                       <FindIcon category={find.category} size={isSelected ? 24 : 19} />
                     </button>
                   );
@@ -633,8 +770,8 @@ function MapScreen({ finds, setScreen, confirmFind }: { finds: Find[]; setScreen
           )}
         </div>
         <div className="space-y-3">
-          {visible.map((find) => <FindCard key={find.id} find={find} confirmFind={confirmFind} selected={find.id === selectedId} selectFind={() => setSelectedId(find.id)} />)}
-          {visible.length === 0 && <p className="rounded-2xl bg-white p-5 text-ink/60">In dieser Kategorie gibt es noch keinen Spot. Fueg den ersten hinzu.</p>}
+          {displayFinds.map((find) => <FindCard key={find.id} find={find} confirmFind={confirmFind} selected={find.id === selectedId} selectFind={() => setSelectedId(find.id)} />)}
+          {displayFinds.length === 0 && <p className="rounded-2xl bg-white p-5 text-ink/60">In dieser Kategorie gibt es noch keinen Spot. Fueg den ersten hinzu.</p>}
         </div>
       </section>
     </>
@@ -672,23 +809,31 @@ function getMarkerPosition(find: Pick<Find, "lat" | "lng">, bbox: ReturnType<typ
 function FindCard({ find, confirmFind, selected, selectFind }: { find: Find; confirmFind: (id: number) => void; selected: boolean; selectFind: () => void }) {
   const confirmations = find.confirmations ?? 0;
   const isConfirmed = find.viewerConfirmed ?? false;
+  const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${find.lat},${find.lng}`)}`;
   return (
     <article className={`rounded-3xl bg-white p-4 shadow-soft ring-2 transition ${selected ? "ring-moss" : "ring-transparent"}`}>
       <button onClick={selectFind} className="flex w-full gap-4 text-left">
-        <div className="grid size-20 shrink-0 place-items-center rounded-2xl bg-oat text-moss"><FindIcon category={find.category} size={28} /></div>
+        <div className="grid size-20 shrink-0 place-items-center overflow-hidden rounded-2xl bg-oat text-moss">
+          {find.imageDataUrl ? <img src={find.imageDataUrl} alt="" className="h-full w-full object-cover" /> : <FindIcon category={find.category} size={28} />}
+        </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
             <h2 className="font-bold">{find.name}</h2>
             <Badge status={find.status} />
           </div>
-          <p className="mt-1 text-sm text-ink/60">{find.place} - {find.distance || "Entfernung folgt"}</p>
+          <p className="mt-1 text-sm text-ink/60">{find.place}{find.distance ? ` - ${find.distance}` : ""}</p>
           <p className="mt-2 text-sm leading-6">{find.description}</p>
           <p className="mt-2 text-sm font-semibold text-moss">{find.price} - zuletzt bestaetigt {find.confirmed} - {find.rating}/5</p>
         </div>
       </button>
-      <button onClick={() => confirmFind(find.id)} disabled={isConfirmed} className={`mt-3 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ${isConfirmed ? "bg-cream text-ink/45" : "bg-sage text-moss"}`}>
-        <Check size={16} /> {isConfirmed ? "Spot bestaetigt" : "Spot bestaetigen"} {confirmations > 0 && `(${confirmations})`}
-      </button>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button onClick={() => confirmFind(find.id)} disabled={isConfirmed} className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ${isConfirmed ? "bg-cream text-ink/45" : "bg-sage text-moss"}`}>
+          <Check size={16} /> {isConfirmed ? "Spot bestaetigt" : "Spot bestaetigen"} {confirmations > 0 && `(${confirmations})`}
+        </button>
+        <a href={mapsUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-full bg-ink px-4 py-2 text-sm font-bold text-white">
+          <MapPinned size={16} /> Route
+        </a>
+      </div>
     </article>
   );
 }
@@ -701,6 +846,7 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPa
   const [placeLoading, setPlaceLoading] = useState(false);
   const [placeError, setPlaceError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [imageDataUrl, setImageDataUrl] = useState("");
 
   useEffect(() => {
     if (placeQuery.trim().length < 3 || selectedPlace?.name === placeQuery) {
@@ -744,7 +890,8 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPa
         confirmations: 1,
         lat: selectedPlace.lat,
         lng: selectedPlace.lng,
-        description: String(form.get("description"))
+        description: String(form.get("description")),
+        imageDataUrl
       });
       setSubmitted(true);
     } catch (error) {
@@ -761,7 +908,11 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPa
         <p className="mt-1 text-sm leading-6 text-ink/70">Du kannst direkt beitragen. Anmeldung ist spaeter nur praktisch, wenn du deine Spots bearbeiten, speichern oder zwischen Geraeten synchronisieren willst.</p>
       </div>
       <form onSubmit={submit} className="grid gap-4 rounded-3xl bg-white p-5 shadow-soft sm:grid-cols-2">
-        <label className="sm:col-span-2"><span className="font-bold">Foto</span><input type="file" accept="image/*" capture="environment" className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 text-sm" /></label>
+        <label className="sm:col-span-2">
+          <span className="font-bold">Foto</span>
+          <input type="file" accept="image/*" capture="environment" onChange={(event) => void handleSpotImage(event, setImageDataUrl, setPlaceError)} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 text-sm" />
+          {imageDataUrl && <img src={imageDataUrl} alt="Spot Vorschau" className="mt-3 h-44 w-full rounded-2xl object-cover" />}
+        </label>
         <Field name="name" label="Produkt/Gericht" placeholder="z.B. vegane Ube-Schnecke" required />
         <div className="sm:col-span-2">
           <label>
@@ -801,6 +952,88 @@ function Field({ name, label, placeholder, required = false }: { name: string; l
 
 function Select({ name, label, options }: { name: string; label: string; options: string[] }) {
   return <label><span className="font-bold">{label}</span><select name={name} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss">{options.map((option) => <option key={option}>{option}</option>)}</select></label>;
+}
+
+async function handleSpotImage(event: ChangeEvent<HTMLInputElement>, setImageDataUrl: (value: string) => void, setError: (value: string) => void) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    setImageDataUrl(await resizeImage(file, 900));
+  } catch {
+    setError("Foto konnte nicht gelesen werden.");
+  }
+}
+
+function resizeImage(file: File, maxSize: number) {
+  return new Promise<string>((resolveImage, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = reject;
+      image.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(image.width * scale);
+        canvas.height = Math.round(image.height * scale);
+        const context = canvas.getContext("2d");
+        if (!context) {
+          reject(new Error("Canvas nicht verfuegbar."));
+          return;
+        }
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolveImage(canvas.toDataURL("image/jpeg", 0.82));
+      };
+      image.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function getDistanceKm(from: UserLocation, to: Pick<Find, "lat" | "lng">) {
+  const radiusKm = 6371;
+  const dLat = toRadians(to.lat - from.lat);
+  const dLng = toRadians(to.lng - from.lng);
+  const lat1 = toRadians(from.lat);
+  const lat2 = toRadians(to.lat);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return radiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatDistance(distanceKm: number) {
+  if (distanceKm < 1) return `${Math.round(distanceKm * 1000)} m`;
+  return `${distanceKm.toFixed(1).replace(".", ",")} km`;
+}
+
+function toRadians(value: number) {
+  return value * Math.PI / 180;
+}
+
+function getScanHistoryKey(item: ScanHistoryItem) {
+  if (item.type === "product") return `${item.type}:${item.barcode}`;
+  return `${item.type}:${item.title}:${item.subtitle}`;
+}
+
+function readScanHistory(): ScanHistoryItem[] {
+  try {
+    const value = localStorage.getItem(SCAN_HISTORY_STORAGE_KEY);
+    if (!value) return [];
+    const items = JSON.parse(value);
+    if (!Array.isArray(items)) return [];
+    return items.filter(isScanHistoryItem).slice(0, SCAN_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function isScanHistoryItem(item: unknown): item is ScanHistoryItem {
+  if (!item || typeof item !== "object") return false;
+  const value = item as Partial<ScanHistoryItem>;
+  if (typeof value.id !== "number" || typeof value.title !== "string" || typeof value.subtitle !== "string") return false;
+  if (value.type === "product") return typeof value.barcode === "string" && Boolean(value.product);
+  if (value.type === "ingredients") return typeof value.photo === "string" && Boolean(value.analysis);
+  if (value.type === "menu") return typeof value.photo === "string" && typeof value.text === "string";
+  return false;
 }
 
 function PricingScreen() {
