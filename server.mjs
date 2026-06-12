@@ -34,8 +34,8 @@ createServer(async (req, res) => {
   } catch (error) {
     return sendJson(res, 500, { error: error instanceof Error ? error.message : "Server error" });
   }
-}).listen(PORT, "127.0.0.1", () => {
-  console.log(`Veggie Navigator API listening on http://127.0.0.1:${PORT}`);
+}).listen(PORT, "0.0.0.0", () => {
+  console.log(`Veggie Navigator listening on port ${PORT}`);
 });
 
 async function getPrices(_req, res, url) {
