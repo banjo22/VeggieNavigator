@@ -20,6 +20,19 @@ export type PlaceSuggestion = {
   provider: string;
 };
 
+export type CommunitySpotPayload = {
+  name: string;
+  place: string;
+  price: string;
+  status: string;
+  category: string;
+  rating: string;
+  confirmations: number;
+  lat: number;
+  lng: number;
+  description: string;
+};
+
 export type IngredientAnalysis = {
   status: "vegan" | "vegetarisch" | "nicht veggie" | "unklar";
   explanation: string;
@@ -65,4 +78,33 @@ export async function searchPlaces(query: string): Promise<PlaceSuggestion[]> {
   if (!response.ok) throw new Error("Standortsuche gerade nicht erreichbar.");
   const data = await response.json();
   return data.items || [];
+}
+
+export async function fetchCommunitySpots() {
+  const response = await fetch(`${API_BASE}/api/community-spots`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Community-Spots nicht erreichbar.");
+  return data.items || [];
+}
+
+export async function createCommunitySpot(spot: CommunitySpotPayload) {
+  const response = await fetch(`${API_BASE}/api/community-spots`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(spot)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Spot konnte nicht gespeichert werden.");
+  return data.item;
+}
+
+export async function confirmCommunitySpot(id: number) {
+  const response = await fetch(`${API_BASE}/api/community-spots/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Spot konnte nicht bestaetigt werden.");
+  return data.item;
 }

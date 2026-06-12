@@ -15,7 +15,7 @@ export type CommunitySpot = {
   id: number;
   name: string;
   place: string;
-  distance: string;
+  distance?: string;
   price: string;
   status: VeggieStatus;
   category: string;

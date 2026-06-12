@@ -4,8 +4,12 @@ import type { ChangeEvent, ReactNode } from "react";
 import {
   analyzeMenuPhoto,
   analyzeIngredientPhoto,
+  confirmCommunitySpot as saveSpotConfirmation,
+  createCommunitySpot as saveCommunitySpot,
+  fetchCommunitySpots,
   fetchPriceOptions,
   searchPlaces,
+  type CommunitySpotPayload,
   type IngredientAnalysis,
   type PlaceSuggestion,
   type PriceOption
@@ -677,7 +681,7 @@ function FindCard({ find, confirmFind, selected, selectFind }: { find: Find; con
             <h2 className="font-bold">{find.name}</h2>
             <Badge status={find.status} />
           </div>
-          <p className="mt-1 text-sm text-ink/60">{find.place} - {find.distance}</p>
+          <p className="mt-1 text-sm text-ink/60">{find.place} - {find.distance || "Entfernung folgt"}</p>
           <p className="mt-2 text-sm leading-6">{find.description}</p>
           <p className="mt-2 text-sm font-semibold text-moss">{find.price} - zuletzt bestaetigt {find.confirmed} - {find.rating}/5</p>
         </div>
@@ -689,13 +693,14 @@ function FindCard({ find, confirmFind, selected, selectFind }: { find: Find; con
   );
 }
 
-function AddFindScreen({ addFind, setScreen }: { addFind: (find: Find) => void; setScreen: (screen: Screen) => void }) {
+function AddFindScreen({ addFind, setScreen }: { addFind: (find: CommunitySpotPayload) => Promise<void>; setScreen: (screen: Screen) => void }) {
   const [submitted, setSubmitted] = useState(false);
   const [placeQuery, setPlaceQuery] = useState("");
   const [placeOptions, setPlaceOptions] = useState<PlaceSuggestion[]>([]);
   const [selectedPlace, setSelectedPlace] = useState<PlaceSuggestion | null>(null);
   const [placeLoading, setPlaceLoading] = useState(false);
   const [placeError, setPlaceError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (placeQuery.trim().length < 3 || selectedPlace?.name === placeQuery) {
@@ -719,29 +724,34 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: Find) => void; 
     return () => window.clearTimeout(timer);
   }, [placeQuery, selectedPlace?.name]);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedPlace) {
       setPlaceError("Bitte waehle einen vorgeschlagenen echten Ort aus.");
       return;
     }
     const form = new FormData(event.currentTarget);
-    addFind({
-      id: Date.now(),
-      name: String(form.get("name")),
-      place: selectedPlace.name,
-      distance: "0,9 km",
-      price: String(form.get("price") || "Preis offen"),
-      status: form.get("status") as VeggieStatus,
-      category: String(form.get("category")),
-      confirmed: "gerade eben",
-      rating: "neu",
-      confirmations: 1,
-      lat: selectedPlace.lat,
-      lng: selectedPlace.lng,
-      description: String(form.get("description"))
-    });
-    setSubmitted(true);
+    setSaving(true);
+    setPlaceError("");
+    try {
+      await addFind({
+        name: String(form.get("name")),
+        place: selectedPlace.name,
+        price: String(form.get("price") || "Preis offen"),
+        status: form.get("status") as VeggieStatus,
+        category: String(form.get("category")),
+        rating: "neu",
+        confirmations: 1,
+        lat: selectedPlace.lat,
+        lng: selectedPlace.lng,
+        description: String(form.get("description"))
+      });
+      setSubmitted(true);
+    } catch (error) {
+      setPlaceError(error instanceof Error ? error.message : "Spot konnte nicht gespeichert werden.");
+    } finally {
+      setSaving(false);
+    }
   }
   return (
     <>
@@ -778,7 +788,7 @@ function AddFindScreen({ addFind, setScreen }: { addFind: (find: Find) => void; 
         <Select name="status" label="Einordnung" options={["vegan", "vegetarisch"]} />
         <Select name="category" label="Kategorie" options={categories.slice(1)} />
         <label className="sm:col-span-2"><span className="font-bold">Kurze Beschreibung</span><textarea name="description" required className="mt-2 min-h-28 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="Was macht den Spot besonders? Was sollte man beim Bestellen beachten?" /></label>
-        <button className="rounded-2xl bg-moss px-5 py-4 text-lg font-bold text-white shadow-soft sm:col-span-2">Spot auf die Karte bringen</button>
+        <button disabled={saving} className="rounded-2xl bg-moss px-5 py-4 text-lg font-bold text-white shadow-soft disabled:opacity-60 sm:col-span-2">{saving ? "Wird gespeichert..." : "Spot auf die Karte bringen"}</button>
         {submitted && <button type="button" onClick={() => setScreen("map")} className="rounded-2xl bg-sage px-5 py-3 font-bold text-moss sm:col-span-2"><Check className="mr-2 inline" size={18} /> Gespeichert, zur Karte</button>}
       </form>
     </>
@@ -834,14 +844,39 @@ export default function App() {
     const confirmedIds = readConfirmedSpotIds();
     return initialFinds.map((find) => ({ ...find, confirmations: 0, viewerConfirmed: confirmedIds.includes(find.id) }));
   });
-  const addFind = (find: Find) => setFinds((current) => [find, ...current]);
-  const confirmFind = (id: number) => setFinds((current) => {
-    const target = current.find((find) => find.id === id);
-    if (!target || target.viewerConfirmed) return current;
+
+  useEffect(() => {
+    let active = true;
+    async function loadSpots() {
+      try {
+        const confirmedIds = readConfirmedSpotIds();
+        const items = await fetchCommunitySpots();
+        if (active) setFinds(items.map((find: Find) => ({ ...find, viewerConfirmed: confirmedIds.includes(find.id) })));
+      } catch (error) {
+        console.warn(error);
+      }
+    }
+    void loadSpots();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const addFind = async (find: CommunitySpotPayload) => {
+    const saved = await saveCommunitySpot(find);
+    setFinds((current) => [{ ...saved, viewerConfirmed: false }, ...current]);
+  };
+
+  const confirmFind = (id: number) => {
+    const target = finds.find((find) => find.id === id);
+    if (!target || target.viewerConfirmed) return;
     const confirmedIds = Array.from(new Set([...readConfirmedSpotIds(), id]));
     localStorage.setItem("veggie-navigator-confirmed-spots", JSON.stringify(confirmedIds));
-    return current.map((find) => find.id === id ? { ...find, confirmations: (find.confirmations ?? 0) + 1, confirmed: "gerade eben", viewerConfirmed: true } : find);
-  });
+    setFinds((current) => current.map((find) => find.id === id ? { ...find, confirmations: (find.confirmations ?? 0) + 1, confirmed: "gerade eben", viewerConfirmed: true } : find));
+    void saveSpotConfirmation(id).then((saved) => {
+      setFinds((current) => current.map((find) => find.id === id ? { ...saved, viewerConfirmed: true } : find));
+    }).catch(console.warn);
+  };
 
   return (
     <Shell screen={screen} setScreen={setScreen}>

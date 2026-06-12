@@ -23,7 +23,23 @@ Kopiere `.env.example` zu `.env`, setze die Variablen im Terminal oder trage sie
 - `OPENAI_API_KEY` aktiviert echte KI-Analyse fuer Zutatenfotos.
 - `OPENAI_MODEL` ist standardmaessig `gpt-4.1-mini`.
 - `GOOGLE_MAPS_API_KEY` aktiviert Google Places fuer echte Standortvorschlaege. Ohne Key nutzt der Server OpenStreetMap Nominatim als reale freie Quelle.
-- `DATABASE_URL` ist fuer die kommende Supabase/Postgres-Anbindung vorgesehen.
+- `SUPABASE_URL` ist die Project URL aus deinem Supabase-Projekt.
+- `SUPABASE_SERVICE_ROLE_KEY` ist der geheime Service-Role-Key fuer die serverseitigen API-Routen. Nicht mit `VITE_` prefixen und nicht im Frontend verwenden.
+
+## Supabase
+
+Lege die Tabelle in Supabase unter `SQL Editor` mit dem Script aus `supabase/schema.sql` an. Danach lokal `.env` befuellen:
+
+```bash
+SUPABASE_URL=https://dein-projekt.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=dein-service-role-key
+```
+
+Die App nutzt Supabase fuer Community-Spots:
+
+- `GET /api/community-spots` laedt Spots aus der Tabelle `community_spots`.
+- `POST /api/community-spots` speichert neue Spots.
+- `POST /api/community-spots/confirm` zaehlt Spot-Bestaetigungen hoch.
 
 ## Vercel Deploy
 
@@ -61,10 +77,10 @@ Der Prototyp nutzt jetzt erste echte externe Dienste direkt aus dem Browser:
 - Zutatenfoto: OpenAI Responses API mit Bildanalyse, wenn `OPENAI_API_KEY` gesetzt ist
 - Standortvorschlaege: Google Places API mit Key, sonst OpenStreetMap Nominatim
 - Karte: OpenStreetMap Embed fuer echte Kartenansicht
+- Community-Spots: Supabase/Postgres, wenn `SUPABASE_URL` und `SUPABASE_SERVICE_ROLE_KEY` gesetzt sind
 
 Weiterhin als MVP-Logik oder lueckenhaft umgesetzt:
 
 - Laden-Verfuegbarkeit und deutsche Supermarkt-Abdeckung bei Preisen
-- Community-Spots werden aktuell noch nicht dauerhaft in einer Datenbank gespeichert
 - Login/Auth
 - Premium-Zahlungen

@@ -1,7 +1,9 @@
+import "dotenv/config";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
+import { confirmCommunitySpot, createCommunitySpot, listCommunitySpots } from "./lib/community-spots.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const ROOT = resolve(".");
@@ -29,6 +31,8 @@ createServer(async (req, res) => {
   try {
     if (url.pathname === "/api/prices") return getPrices(req, res, url);
     if (url.pathname === "/api/places") return getPlaces(req, res, url);
+    if (url.pathname === "/api/community-spots") return communitySpots(req, res);
+    if (url.pathname === "/api/community-spots/confirm") return confirmSpot(req, res);
     if (url.pathname === "/api/analyze-ingredients") return analyzeIngredients(req, res);
     return serveStatic(res, url.pathname);
   } catch (error) {
@@ -65,6 +69,29 @@ async function getPrices(_req, res, url) {
     .slice(0, 6);
 
   return sendJson(res, 200, { items });
+}
+
+async function communitySpots(req, res) {
+  if (req.method === "GET") {
+    const items = await listCommunitySpots();
+    return sendJson(res, 200, { items });
+  }
+
+  if (req.method === "POST") {
+    const body = await readBody(req);
+    const item = await createCommunitySpot(body);
+    return sendJson(res, 201, { item });
+  }
+
+  return sendJson(res, 405, { error: "GET or POST required" });
+}
+
+async function confirmSpot(req, res) {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "POST required" });
+  const body = await readBody(req);
+  if (!body.id) return sendJson(res, 400, { error: "id missing" });
+  const item = await confirmCommunitySpot(body.id);
+  return sendJson(res, 200, { item });
 }
 
 async function getPlaces(_req, res, url) {
