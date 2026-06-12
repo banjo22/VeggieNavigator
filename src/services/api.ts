@@ -27,7 +27,7 @@ export type IngredientAnalysis = {
   confidence: number;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8787";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 export async function fetchPriceOptions(barcode: string): Promise<PriceOption[]> {
   const response = await fetch(`${API_BASE}/api/prices?barcode=${encodeURIComponent(barcode)}`);

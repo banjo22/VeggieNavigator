@@ -6,11 +6,11 @@ Klickbarer MVP-Prototyp fuer eine mobile-first Webapp rund um vegane, vegetarisc
 
 ```bash
 npm install
-npm run dev
 npm run api
+npm run dev
 ```
 
-Danach die lokale Vite-URL im Browser oeffnen. Fuer eine gebaute Version mit API-Server:
+Danach die lokale Vite-URL im Browser oeffnen. `npm run api` startet lokal den API-Server auf Port 8787, Vite leitet `/api` automatisch dorthin weiter. Fuer eine gebaute Version mit API-Server:
 
 ```bash
 npm run app
@@ -18,16 +18,37 @@ npm run app
 
 ## API Keys
 
-Kopiere `.env.example` zu `.env` oder setze die Variablen im Terminal:
+Kopiere `.env.example` zu `.env`, setze die Variablen im Terminal oder trage sie bei Vercel unter `Project Settings -> Environment Variables` ein:
 
 - `OPENAI_API_KEY` aktiviert echte KI-Analyse fuer Zutatenfotos.
 - `OPENAI_MODEL` ist standardmaessig `gpt-4.1-mini`.
 - `GOOGLE_MAPS_API_KEY` aktiviert Google Places fuer echte Standortvorschlaege. Ohne Key nutzt der Server OpenStreetMap Nominatim als reale freie Quelle.
+- `DATABASE_URL` ist fuer die kommende Supabase/Postgres-Anbindung vorgesehen.
+
+## Vercel Deploy
+
+Die App ist fuer Vercel vorbereitet:
+
+- Frontend: Vite Build nach `dist`
+- API: Vercel Functions in `api/`
+- Konfiguration: `vercel.json`
+
+Vercel-Einstellungen:
+
+```text
+Framework Preset: Vite
+Build Command: npm run build
+Output Directory: dist
+Install Command: npm install
+```
+
+Nach jedem `git push` deployed Vercel automatisch eine neue Version. Custom Domains werden in Vercel unter `Project Settings -> Domains` verbunden.
 
 ## Struktur
 
 - `src/App.tsx` enthaelt die Screens, Navigation und interaktiven UI-Zustaende.
-- `src/data/mockData.ts` enthaelt alle Mock-Daten fuer Produkte, Menues, Community-Funde und Pricing.
+- `src/data/mockData.ts` enthaelt Kategorien, leere Startdaten und Pricing.
+- `api/` enthaelt die Vercel Functions fuer Preise, Standortsuche und KI-Analyse.
 - `src/styles.css` enthaelt Tailwind-Basisstyles und kleine globale UI-Details.
 
 ## Echte Dienste und Mock-Daten
@@ -41,12 +62,9 @@ Der Prototyp nutzt jetzt erste echte externe Dienste direkt aus dem Browser:
 - Standortvorschlaege: Google Places API mit Key, sonst OpenStreetMap Nominatim
 - Karte: OpenStreetMap Embed fuer echte Kartenansicht
 
-Weiterhin als MVP-/Mock-Logik oder lueckenhaft umgesetzt:
+Weiterhin als MVP-Logik oder lueckenhaft umgesetzt:
 
 - Laden-Verfuegbarkeit und deutsche Supermarkt-Abdeckung bei Preisen
-- Speisekarten-Analyse
-- Community-Funde und gespeicherte Funde
+- Community-Spots werden aktuell noch nicht dauerhaft in einer Datenbank gespeichert
 - Login/Auth
 - Premium-Zahlungen
-
-Im Code sind Kommentare markiert fuer spaetere Anbindungen an KI-Bildanalyse, Community-Datenbank, Authentifizierung, Haendlerpreise und erweiterte Kartenanbieter.
