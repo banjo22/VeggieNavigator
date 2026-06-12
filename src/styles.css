@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #242821;
+  background: #f7f3ea;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.map-grid {
+  background-image:
+    linear-gradient(rgba(79, 111, 82, 0.14) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(79, 111, 82, 0.14) 1px, transparent 1px);
+  background-size: 42px 42px;
+}
