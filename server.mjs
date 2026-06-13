@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { confirmCommunitySpot, createCommunitySpot, listCommunitySpots } from "./lib/community-spots.js";
+import { fetchProductByBarcode } from "./lib/open-food-facts.js";
+import { consumeScanQuota } from "./lib/scan-limits.js";
 import { createComment, createScan, getProfile, listComments, listScans, upsertProfile } from "./lib/user-activity.js";
 
 const PORT = Number(process.env.PORT || 8787);
@@ -24,13 +26,14 @@ const mime = {
 
 createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:5173");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   if (req.method === "OPTIONS") return sendJson(res, 204, {});
 
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
   try {
     if (url.pathname === "/api/prices") return getPrices(req, res, url);
+    if (url.pathname === "/api/product") return getProduct(req, res, url);
     if (url.pathname === "/api/places") return getPlaces(req, res, url);
     if (url.pathname === "/api/community-spots") return communitySpots(req, res);
     if (url.pathname === "/api/community-spots/confirm") return confirmSpot(req, res);
@@ -73,6 +76,25 @@ async function getPrices(_req, res, url) {
     .slice(0, 6);
 
   return sendJson(res, 200, { items });
+}
+
+async function getProduct(req, res, url) {
+  if (req.method !== "GET") return sendJson(res, 405, { error: "GET required" });
+  const barcode = url.searchParams.get("barcode")?.trim();
+  if (!barcode) return sendJson(res, 400, { error: "barcode missing" });
+
+  let quota;
+  try {
+    quota = await consumeScanQuota(req);
+  } catch (error) {
+    return sendJson(res, error.status || 500, {
+      error: error.message || "Scan-Limit konnte nicht geprueft werden.",
+      quota: error.quota
+    });
+  }
+
+  const product = await fetchProductByBarcode(barcode);
+  return sendJson(res, 200, { product, quota });
 }
 
 async function communitySpots(req, res) {
@@ -226,6 +248,15 @@ async function analyzeIngredients(req, res) {
   const isMenu = mode === "menu";
   const images = isMenu ? normalizeImages(imageDataUrls || imageDataUrl) : normalizeImages(imageDataUrl).slice(0, 1);
   if (images.length === 0) return sendJson(res, 400, { error: "Bitte lade mindestens ein Bild hoch oder fotografiere eine Seite." });
+  let quota;
+  try {
+    quota = await consumeScanQuota(req);
+  } catch (error) {
+    return sendJson(res, error.status || 500, {
+      error: error.message || "Scan-Limit konnte nicht geprueft werden.",
+      quota: error.quota
+    });
+  }
   const prompt = isMenu
     ? [
         "Analysiere ausschliesslich die sichtbare Speisekarte in allen Bildern. Die Bilder koennen mehrere Seiten derselben Speisekarte sein.",
@@ -272,8 +303,8 @@ async function analyzeIngredients(req, res) {
   if (!response.ok) return sendJson(res, response.status, { error: data.error?.message || "OpenAI request failed" });
   const text = extractResponseText(data);
   if (!text) return sendJson(res, 502, { error: "OpenAI hat keine lesbare Analyse zurueckgegeben. Bitte Bild erneut versuchen." });
-  if (isMenu) return sendJson(res, 200, { result: { text }, raw: text, source: "OpenAI Responses API" });
-  return sendJson(res, 200, { result: safeJson(text), raw: text, source: "OpenAI Responses API" });
+  if (isMenu) return sendJson(res, 200, { result: { text }, raw: text, source: "OpenAI Responses API", quota });
+  return sendJson(res, 200, { result: safeJson(text), raw: text, source: "OpenAI Responses API", quota });
 }
 
 async function serveStatic(res, pathname) {

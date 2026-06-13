@@ -9,8 +9,9 @@ import {
   fetchComments,
   fetchCommunitySpots,
   fetchProfile,
-  fetchScans,
   fetchPriceOptions,
+  fetchProductByBarcode,
+  fetchScans,
   saveComment,
   saveProfile as saveUserProfile,
   saveScan,
@@ -20,7 +21,8 @@ import {
   type IngredientAnalysis,
   type PlaceSuggestion,
   type ProfilePayload,
-  type PriceOption
+  type PriceOption,
+  type ScanQuota
 } from "./services/api";
 import {
   categories,
@@ -31,8 +33,8 @@ import {
   type CommunitySpot,
   type VeggieStatus
 } from "./data/mockData";
-import { authConfigured, getCurrentUser, logout, onAuthChange, signInWithOAuth, signInWithPassword, signUpWithPassword, updateProfileName, type AuthUser } from "./services/auth";
-import { fetchProductByBarcode, type ProductResult } from "./services/openFoodFacts";
+import { authConfigured, getAccessToken, getCurrentUser, logout, onAuthChange, signInWithOAuth, signInWithPassword, signUpWithPassword, updateProfileName, type AuthUser } from "./services/auth";
+import type { ProductResult } from "./services/openFoodFacts";
 
 type Screen = "home" | "scanner" | "map" | "add" | "pricing" | "profile";
 type Find = CommunitySpot & { confirmations?: number; viewerConfirmed?: boolean };
@@ -42,12 +44,15 @@ type ScanHistoryItem =
   | { id: number; type: "product"; title: string; subtitle: string; barcode: string; product: ProductResult }
   | { id: number; type: "ingredients"; title: string; subtitle: string; photo: string; analysis: IngredientAnalysis }
   | { id: number; type: "menu"; title: string; subtitle: string; photo: string; text: string };
+type ScanRow = { id: number; type: string; title: string; subtitle: string; payload?: unknown };
 type SpotComment = { id: number; author: string; text: string; createdAt: string };
 type ProfilePrivacy = { publicSpots: boolean; publicScans: boolean; publicComments: boolean };
 
 const SCAN_HISTORY_STORAGE_KEY = "veggie-navigator-scan-history";
 const SCAN_HISTORY_LIMIT = 10;
 const PROFILE_PRIVACY_STORAGE_KEY = "veggie-navigator-profile-privacy";
+const GUEST_DAILY_SCAN_LIMIT = 3;
+const USER_DAILY_SCAN_LIMIT = 5;
 
 declare global {
   interface Window {
@@ -197,7 +202,9 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
   const [ingredientPhoto, setIngredientPhoto] = useState("");
   const [ingredientMessage, setIngredientMessage] = useState("");
   const [menuMessage, setMenuMessage] = useState("");
-  const [scanHistory, setScanHistory] = useState<ScanHistoryItem[]>(readScanHistory);
+  const [historyMessage, setHistoryMessage] = useState("");
+  const [scanQuota, setScanQuota] = useState<ScanQuota | null>(null);
+  const [scanHistory, setScanHistory] = useState<ScanHistoryItem[]>(() => readScanHistory(user?.id));
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -225,8 +232,31 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
   }, [photoCameraActive, scanMode]);
 
   useEffect(() => {
-    localStorage.setItem(SCAN_HISTORY_STORAGE_KEY, JSON.stringify(scanHistory.slice(0, SCAN_HISTORY_LIMIT)));
-  }, [scanHistory]);
+    saveScanHistory(scanHistory, user?.id);
+  }, [scanHistory, user?.id]);
+
+  useEffect(() => {
+    let active = true;
+    const userScopedHistory = readScanHistory(user?.id);
+    setScanHistory(userScopedHistory);
+    setScanQuota(null);
+    setHistoryMessage("");
+    if (!user) return () => {
+      active = false;
+    };
+    void fetchScans(user.id).then((items) => {
+      if (!active) return;
+      const remoteHistory = items.map(scanRowToHistoryItem).filter(Boolean) as ScanHistoryItem[];
+      setScanHistory(mergeScanHistory(remoteHistory, userScopedHistory));
+    }).catch((error) => {
+      if (!active) return;
+      console.warn(error);
+      setHistoryMessage("Deine gespeicherten Scans konnten gerade nicht aus Supabase geladen werden.");
+    });
+    return () => {
+      active = false;
+    };
+  }, [user?.id]);
 
   async function scanProduct(code = barcode) {
     const cleanedCode = code.trim();
@@ -239,7 +269,8 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     setPrices([]);
     setIngredientMessage("");
     try {
-      const result = await fetchProductByBarcode(cleanedCode);
+      const { product: result, quota } = await fetchProductByBarcode(cleanedCode, await getAccessToken());
+      if (quota) setScanQuota(quota);
       if (result) {
         setProduct(result);
         addScanHistory({
@@ -400,7 +431,8 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     setAnalysis(null);
     setIngredientMessage("KI analysiert die Zutatenliste.");
     try {
-      const result = await analyzeIngredientPhoto(imageDataUrl, controller.signal);
+      const { result, quota } = await analyzeIngredientPhoto(imageDataUrl, controller.signal, await getAccessToken());
+      if (quota) setScanQuota(quota);
       setAnalysis(result);
       addScanHistory({
         id: Date.now(),
@@ -435,7 +467,8 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     setMenuText("");
     setMenuMessage("Speisekarte wird analysiert.");
     try {
-      const result = await analyzeMenuPhoto(images, controller.signal);
+      const { text: result, quota } = await analyzeMenuPhoto(images, controller.signal, await getAccessToken());
+      if (quota) setScanQuota(quota);
       setMenuText(result);
       addScanHistory({
         id: Date.now(),
@@ -509,7 +542,14 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
         subtitle: item.subtitle,
         payload: item,
         isPublic: privacy.publicScans
-      }).catch(console.warn);
+      }).then((saved: ScanRow) => {
+        const savedItem = scanRowToHistoryItem(saved);
+        if (!savedItem) return;
+        setScanHistory((current) => mergeScanHistory([savedItem], current));
+      }).catch((error) => {
+        console.warn(error);
+        setHistoryMessage("Scan ist lokal gespeichert, aber noch nicht in Supabase angekommen.");
+      });
     }
   }
 
@@ -542,12 +582,21 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
   }
 
   const hasCurrentScan = scanMode === "ingredients" ? Boolean(ingredientPhoto || analysis || analysisLoading) : Boolean(menuPhotos.length || menuText || menuLoading);
+  const dailyScanLimit = user ? USER_DAILY_SCAN_LIMIT : GUEST_DAILY_SCAN_LIMIT;
+  const shownRemainingScans = scanQuota ? scanQuota.remaining : dailyScanLimit;
 
   return (
     <>
       <Header eyebrow="Scanner" title="Was willst du scannen?" />
       <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.85fr)]">
         <section className="min-w-0 rounded-3xl bg-white p-5 shadow-soft">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-oat bg-cream px-4 py-3">
+            <div>
+              <p className="text-sm font-bold text-moss">Scans heute</p>
+              <p className="text-xs leading-5 text-ink/55">{user ? "Eingeloggt: 5 pro Tag" : "Ohne Login: 3 pro Tag"}</p>
+            </div>
+            <span className="rounded-2xl bg-white px-4 py-2 text-sm font-black text-ink">{shownRemainingScans}/{dailyScanLimit} uebrig</span>
+          </div>
           <div className="mb-4 grid grid-cols-2 gap-2 rounded-3xl bg-cream p-2">
             <button onClick={() => setScanMode("ingredients")} className={`rounded-2xl px-4 py-3 text-sm font-bold ${scanMode === "ingredients" ? "bg-moss text-white" : "bg-white text-ink/65"}`}>Zutaten</button>
             <button onClick={() => setScanMode("menu")} className={`rounded-2xl px-4 py-3 text-sm font-bold ${scanMode === "menu" ? "bg-moss text-white" : "bg-white text-ink/65"}`}>Speisekarte</button>
@@ -622,6 +671,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
             )}
           </div>
           <ScanHistoryList items={scanHistory} restoreScan={restoreScan} deleteItem={deleteScanHistoryItem} clearItems={clearScanHistory} />
+          {historyMessage && <p className="rounded-2xl bg-tomato px-4 py-3 text-sm font-bold text-white">{historyMessage}</p>}
         </section>
       </div>
     </>
@@ -916,13 +966,17 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
   const [publicProfile, setPublicProfile] = useState<{ id?: string; name: string } | null>(null);
   const [comments, setComments] = useState<SpotComment[]>(() => readSpotComments(find.id));
   const [commentText, setCommentText] = useState("");
+  const [commentMessage, setCommentMessage] = useState("");
   const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${find.lat},${find.lng}`)}`;
 
   useEffect(() => {
     let active = true;
     void fetchComments(find.id).then((items) => {
       if (active) setComments(items);
-    }).catch(console.warn);
+    }).catch((error) => {
+      console.warn(error);
+      if (active) setCommentMessage("Kommentare konnten gerade nicht aus Supabase geladen werden.");
+    });
     return () => {
       active = false;
     };
@@ -940,6 +994,7 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
     if (!isLoggedIn || !text) return;
     const currentUser = user;
     if (!currentUser) return;
+    setCommentMessage("");
     const payload: CommentPayload = {
       spotId: find.id,
       userId: currentUser.id,
@@ -958,7 +1013,11 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
     saveSpotComments(find.id, next);
     void saveComment(payload).then((saved) => {
       setComments((current) => [saved, ...current.filter((item) => item.id !== comment.id)]);
-    }).catch(console.warn);
+      setCommentMessage("Kommentar gespeichert.");
+    }).catch((error) => {
+      console.warn(error);
+      setCommentMessage("Kommentar ist lokal sichtbar, aber noch nicht in Supabase gespeichert.");
+    });
     setCommentText("");
   }
 
@@ -1034,6 +1093,7 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
                   <LogIn size={18} /> Zum Kommentieren anmelden
                 </button>
               )}
+              {commentMessage && <p className="mt-3 rounded-2xl bg-cream px-4 py-3 text-sm font-bold text-moss">{commentMessage}</p>}
             </div>
           </section>
         </div>
@@ -1351,9 +1411,13 @@ function getScanHistoryKey(item: ScanHistoryItem) {
   return `${item.type}:${item.title}:${item.subtitle}`;
 }
 
-function readScanHistory(): ScanHistoryItem[] {
+function getScanHistoryStorageKey(userId?: string) {
+  return userId ? `${SCAN_HISTORY_STORAGE_KEY}-${userId}` : `${SCAN_HISTORY_STORAGE_KEY}-guest`;
+}
+
+function readScanHistory(userId?: string): ScanHistoryItem[] {
   try {
-    const value = localStorage.getItem(SCAN_HISTORY_STORAGE_KEY);
+    const value = localStorage.getItem(getScanHistoryStorageKey(userId));
     if (!value) return [];
     const items = JSON.parse(value);
     if (!Array.isArray(items)) return [];
@@ -1361,6 +1425,20 @@ function readScanHistory(): ScanHistoryItem[] {
   } catch {
     return [];
   }
+}
+
+function saveScanHistory(items: ScanHistoryItem[], userId?: string) {
+  localStorage.setItem(getScanHistoryStorageKey(userId), JSON.stringify(items.slice(0, SCAN_HISTORY_LIMIT)));
+}
+
+function mergeScanHistory(primary: ScanHistoryItem[], secondary: ScanHistoryItem[] = []) {
+  const seen = new Set<string>();
+  return [...primary, ...secondary].filter((item) => {
+    const key = getScanHistoryKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, SCAN_HISTORY_LIMIT);
 }
 
 function isScanHistoryItem(item: unknown): item is ScanHistoryItem {
@@ -1373,7 +1451,7 @@ function isScanHistoryItem(item: unknown): item is ScanHistoryItem {
   return false;
 }
 
-function scanRowToHistoryItem(row: { id: number; type: string; title: string; subtitle: string; payload?: unknown }): ScanHistoryItem | null {
+function scanRowToHistoryItem(row: ScanRow): ScanHistoryItem | null {
   const payload = row.payload && typeof row.payload === "object" ? row.payload : {};
   if (isScanHistoryItem(payload)) return { ...payload, id: row.id };
   if (row.type === "product") return null;
@@ -1415,7 +1493,7 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
   const mySpotIds = readMySpotIds();
   const mySpots = finds.filter((find) => find.createdBy === user?.id || mySpotIds.includes(find.id));
   const totalConfirmations = mySpots.reduce((sum, find) => sum + (find.confirmations ?? 0), 0);
-  const scans = remoteScans.length > 0 ? remoteScans : readScanHistory();
+  const scans = user ? mergeScanHistory(remoteScans, readScanHistory(user.id)) : readScanHistory();
 
   useEffect(() => {
     saveProfilePrivacy(privacy);
@@ -1509,7 +1587,7 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
 
   return (
     <>
-      <Header eyebrow="Profil" title={user ? "Willkommen zurueck." : "Kostenlos anmelden"} />
+      <Header eyebrow="Profil" title={user ? "Willkommen zurueck." : "Einloggen"} />
       {user ? (
         <section className="space-y-4">
           <div className="overflow-hidden rounded-3xl bg-ink text-white shadow-soft">
@@ -1599,64 +1677,72 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
           {message && <p className="rounded-2xl bg-sage px-4 py-3 text-sm font-bold text-moss">{message}</p>}
         </section>
       ) : (
-        <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
-          <div className="rounded-3xl bg-white p-5 shadow-soft">
-            <div className="grid size-12 place-items-center rounded-2xl bg-sage text-moss"><LogIn /></div>
-              <div className="mt-4 rounded-3xl bg-cream p-4">
-                <p className="text-sm font-bold uppercase text-moss">Dein Veggie Profil</p>
-                <p className="mt-2 leading-7 text-ink/70">Melde dich mit Google oder E-Mail an. Du kannst weiter ohne Account nutzen, aber Kommentare, Lieblingsspots und spaetere Sync-Funktionen gehoeren zu deinem Profil.</p>
+        <section className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[minmax(0,0.95fr)_minmax(18rem,0.7fr)] lg:items-start">
+          <div className="overflow-hidden rounded-[28px] border border-oat/70 bg-white shadow-soft">
+            <div className="border-b border-oat/70 bg-white px-6 py-5">
+              <div className="flex items-center gap-3">
+                <span className="grid size-11 place-items-center rounded-2xl bg-sage text-moss"><LogIn size={20} /></span>
+                <div>
+                  <p className="text-sm font-bold uppercase tracking-wide text-moss">Veggie Navigator</p>
+                  <h2 className="text-2xl font-bold">Dein Profil</h2>
+                </div>
               </div>
-              {!authConfigured && <p className="mt-4 rounded-2xl bg-tomato px-4 py-3 text-sm font-bold text-white">Supabase Auth fehlt noch: Setze `VITE_SUPABASE_URL` und `VITE_SUPABASE_ANON_KEY`.</p>}
-              <button type="button" onClick={() => void socialLogin("google")} disabled={loadingAuth || !authConfigured} className="mt-5 flex w-full items-center justify-center gap-3 rounded-2xl border border-oat bg-white px-5 py-4 font-bold text-ink shadow-sm transition hover:bg-cream disabled:opacity-60">
+              <p className="mt-4 max-w-xl text-sm leading-6 text-ink/60">Speichere deine Scans, kommentiere Spots und behalte deine eigenen Beitraege im Blick.</p>
+            </div>
+            <div className="p-6">
+              {!authConfigured && <p className="mb-4 rounded-2xl bg-tomato px-4 py-3 text-sm font-bold text-white">Supabase Auth fehlt noch: Setze `VITE_SUPABASE_URL` und `VITE_SUPABASE_ANON_KEY`.</p>}
+              <button type="button" onClick={() => void socialLogin("google")} disabled={loadingAuth || !authConfigured} className="flex w-full items-center justify-center gap-3 rounded-2xl border border-oat bg-white px-5 py-3.5 font-bold text-ink shadow-sm transition hover:border-moss/40 hover:bg-cream disabled:opacity-60">
                 <GoogleLogo /> Mit Google anmelden
               </button>
-              <div className="my-5 flex items-center gap-3 text-xs font-bold uppercase text-ink/40">
+              <div className="my-5 flex items-center gap-3 text-xs font-bold uppercase text-ink/35">
                 <span className="h-px flex-1 bg-oat" />
-                oder mit E-Mail
+                oder
                 <span className="h-px flex-1 bg-oat" />
               </div>
-              <div className="grid grid-cols-2 gap-2 rounded-3xl bg-cream p-2">
-                <button type="button" onClick={() => setAuthMode("login")} className={`rounded-2xl px-4 py-3 text-sm font-bold ${authMode === "login" ? "bg-moss text-white" : "bg-white text-ink/65"}`}>Anmelden</button>
-                <button type="button" onClick={() => setAuthMode("register")} className={`rounded-2xl px-4 py-3 text-sm font-bold ${authMode === "register" ? "bg-moss text-white" : "bg-white text-ink/65"}`}>Registrieren</button>
+              <div className="grid grid-cols-2 gap-1 rounded-2xl border border-oat bg-cream p-1">
+                <button type="button" onClick={() => setAuthMode("login")} className={`rounded-xl px-4 py-3 text-sm font-bold transition ${authMode === "login" ? "bg-moss text-white shadow-sm" : "text-ink/60 hover:bg-white"}`}>Anmelden</button>
+                <button type="button" onClick={() => setAuthMode("register")} className={`rounded-xl px-4 py-3 text-sm font-bold transition ${authMode === "register" ? "bg-moss text-white shadow-sm" : "text-ink/60 hover:bg-white"}`}>Registrieren</button>
               </div>
-              <form onSubmit={login} className="mt-5 space-y-3">
+              <form onSubmit={login} className="mt-5 space-y-4">
                 {authMode === "register" && (
-                  <label>
-                    <span className="font-bold">Profilname</span>
-                    <input value={profileName} onChange={(event) => setProfileName(event.target.value)} required={authMode === "register"} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="z.B. VeggieNils" />
+                  <label className="block">
+                    <span className="text-sm font-bold text-ink/75">Profilname</span>
+                    <input value={profileName} onChange={(event) => setProfileName(event.target.value)} required={authMode === "register"} className="mt-2 w-full rounded-2xl border border-oat bg-white px-4 py-3 outline-none transition focus:border-moss focus:ring-4 focus:ring-sage" placeholder="z.B. VeggieNils" />
                   </label>
                 )}
-                <label>
-                  <span className="font-bold">E-Mail</span>
-                  <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="du@example.com" />
+                <label className="block">
+                  <span className="text-sm font-bold text-ink/75">E-Mail</span>
+                  <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required className="mt-2 w-full rounded-2xl border border-oat bg-white px-4 py-3 outline-none transition focus:border-moss focus:ring-4 focus:ring-sage" placeholder="du@example.com" />
                 </label>
-                <label>
-                  <span className="font-bold">Passwort</span>
-                  <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required minLength={6} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="Mindestens 6 Zeichen" />
+                <label className="block">
+                  <span className="text-sm font-bold text-ink/75">Passwort</span>
+                  <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required minLength={6} className="mt-2 w-full rounded-2xl border border-oat bg-white px-4 py-3 outline-none transition focus:border-moss focus:ring-4 focus:ring-sage" placeholder="Mindestens 6 Zeichen" />
                 </label>
-                <button disabled={loadingAuth || !authConfigured} className="w-full rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft disabled:opacity-60">{loadingAuth ? "Bitte warten..." : authMode === "login" ? "Mit E-Mail anmelden" : "Account erstellen"}</button>
-                <button type="button" onClick={() => setScreen("add")} className="w-full rounded-2xl bg-sage px-5 py-3 font-bold text-moss">Ohne Login Spot teilen</button>
+                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                  <button disabled={loadingAuth || !authConfigured} className="rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft transition hover:bg-leaf disabled:opacity-60">{loadingAuth ? "Bitte warten..." : authMode === "login" ? "Einloggen" : "Account erstellen"}</button>
+                  <button type="button" onClick={() => setScreen("add")} className="rounded-2xl border border-oat bg-white px-5 py-3 font-bold text-moss transition hover:bg-cream">Ohne Login weiter</button>
+                </div>
               </form>
-            {message && <p className="mt-4 rounded-2xl bg-sage px-4 py-3 text-sm font-bold text-moss">{message}</p>}
+              {message && <p className="mt-4 rounded-2xl bg-sage px-4 py-3 text-sm font-bold text-moss">{message}</p>}
+            </div>
           </div>
-          <div className="rounded-3xl bg-ink p-5 text-white shadow-soft">
-            <h2 className="text-2xl font-bold">Mit Login bekommst du mehr Kontrolle.</h2>
-            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <aside className="rounded-[28px] border border-oat/70 bg-cream p-6">
+            <p className="text-sm font-bold uppercase tracking-wide text-moss">Warum ein Profil?</p>
+            <h2 className="mt-2 text-2xl font-bold leading-tight">Alles, was du beitraegst, bleibt bei dir.</h2>
+            <div className="mt-5 space-y-3">
               {[
-                ["Kommentieren", "Tipps, Fragen und Updates direkt an Spots schreiben."],
-                ["Lieblingsspots", "Orte merken und spaeter schneller wiederfinden."],
-                ["Eigene Beitraege", "Deine Spots spaeter bearbeiten oder aktualisieren."],
-                ["Scan-Verlauf Sync", "Letzte Scans langfristig mit deinem Account sichern."],
-                ["Preis-Alerts", "Benachrichtigung, wenn ein Produkt in deiner Naehe guenstiger auftaucht."],
-                ["Vertrauen", "Bestaetigungen von echten Profilen werden nuetzlicher fuer alle."]
+                ["Scans speichern", "Deine letzten Checks bleiben mit deinem Account verbunden."],
+                ["Spots verwalten", "Eigene Fundorte erscheinen gesammelt in deinem Profil."],
+                ["Kommentieren", "Ergaenze Tipps und Updates zu Community-Spots."],
+                ["Privatsphaere", "Du entscheidest, was oeffentlich sichtbar ist."]
               ].map(([title, text]) => (
-                <div key={title} className="rounded-2xl bg-white/10 p-4">
-                  <p className="font-bold text-honey">{title}</p>
-                  <p className="mt-2 text-sm leading-6 text-white/75">{text}</p>
+                <div key={title} className="flex gap-3">
+                  <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-white text-moss"><Check size={15} /></span>
+                  <p className="text-sm leading-6 text-ink/65"><b className="block text-ink">{title}</b>{text}</p>
                 </div>
               ))}
             </div>
-          </div>
+          </aside>
         </section>
       )}
     </>

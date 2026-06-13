@@ -1,3 +1,5 @@
+import { consumeScanQuota } from "../lib/scan-limits.js";
+
 export const config = {
   maxDuration: 90
 };
@@ -15,6 +17,15 @@ export default async function handler(req, res) {
     const isMenu = mode === "menu";
     const images = isMenu ? normalizeImages(imageDataUrls || imageDataUrl) : normalizeImages(imageDataUrl).slice(0, 1);
     if (images.length === 0) return res.status(400).json({ error: "Bitte lade mindestens ein Bild hoch oder fotografiere eine Seite." });
+    let quota;
+    try {
+      quota = await consumeScanQuota(req);
+    } catch (error) {
+      return res.status(error.status || 500).json({
+        error: error.message || "Scan-Limit konnte nicht geprueft werden.",
+        quota: error.quota
+      });
+    }
 
     const prompt = isMenu
       ? [
@@ -60,8 +71,8 @@ export default async function handler(req, res) {
 
     const text = extractResponseText(data);
     if (!text) return res.status(502).json({ error: "OpenAI hat keine lesbare Analyse zurueckgegeben. Bitte Bild erneut versuchen." });
-    if (isMenu) return res.status(200).json({ result: { text }, raw: text, source: "OpenAI Responses API" });
-    return res.status(200).json({ result: safeJson(text), raw: text, source: "OpenAI Responses API" });
+    if (isMenu) return res.status(200).json({ result: { text }, raw: text, source: "OpenAI Responses API", quota });
+    return res.status(200).json({ result: safeJson(text), raw: text, source: "OpenAI Responses API", quota });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "KI-Analyse nicht erreichbar." });
   }
@@ -116,6 +127,6 @@ function extractResponseText(data) {
 function setCors(req, res) {
   const origin = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
 }

@@ -24,6 +24,13 @@ export async function getCurrentUser() {
   return data.user;
 }
 
+export async function getAccessToken() {
+  if (!supabase) return "";
+  const { data, error } = await supabase.auth.getSession();
+  if (error) return "";
+  return data.session?.access_token || "";
+}
+
 export function onAuthChange(callback: (user: AuthUser | null) => void) {
   if (!supabase) return () => {};
   const { data } = supabase.auth.onAuthStateChange((_event, session) => {

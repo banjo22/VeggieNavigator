@@ -1,3 +1,5 @@
+import type { ProductResult } from "./openFoodFacts";
+
 export type PriceOption = {
   store: string;
   address: string;
@@ -76,28 +78,51 @@ export async function fetchPriceOptions(barcode: string): Promise<PriceOption[]>
   return data.items || [];
 }
 
-export async function analyzeIngredientPhoto(imageDataUrl: string, signal?: AbortSignal): Promise<IngredientAnalysis> {
+export async function fetchProductByBarcode(barcode: string, accessToken = ""): Promise<{ product: ProductResult | null; quota?: ScanQuota }> {
+  const response = await fetch(`${API_BASE}/api/product?barcode=${encodeURIComponent(barcode)}`, {
+    headers: authHeaders(accessToken)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Produktdaten nicht erreichbar.");
+  return { product: data.product || null, quota: data.quota };
+}
+
+export type ScanQuota = {
+  limit: number;
+  used: number;
+  remaining: number;
+  usageDate: string;
+  subjectType: "guest" | "user";
+};
+
+export async function analyzeIngredientPhoto(imageDataUrl: string, signal?: AbortSignal, accessToken = ""): Promise<{ result: IngredientAnalysis; quota?: ScanQuota }> {
   const response = await fetch(`${API_BASE}/api/analyze-ingredients`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(accessToken),
     body: JSON.stringify({ imageDataUrl, mode: "ingredients" }),
     signal
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "KI-Analyse nicht erreichbar.");
-  return data.result;
+  return { result: data.result, quota: data.quota };
 }
 
-export async function analyzeMenuPhoto(imageDataUrls: string[], signal?: AbortSignal): Promise<string> {
+export async function analyzeMenuPhoto(imageDataUrls: string[], signal?: AbortSignal, accessToken = ""): Promise<{ text: string; quota?: ScanQuota }> {
   const response = await fetch(`${API_BASE}/api/analyze-ingredients`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(accessToken),
     body: JSON.stringify({ imageDataUrl: imageDataUrls[0], imageDataUrls, mode: "menu" }),
     signal
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Speisekartenanalyse nicht erreichbar.");
-  return data.result?.text || data.raw || "";
+  return { text: data.result?.text || data.raw || "", quota: data.quota };
+}
+
+function authHeaders(accessToken = ""): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  return headers;
 }
 
 export async function searchPlaces(query: string): Promise<PlaceSuggestion[]> {
