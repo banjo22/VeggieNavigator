@@ -5,8 +5,9 @@ import { existsSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { confirmCommunitySpot, createCommunitySpot, listCommunitySpots } from "./lib/community-spots.js";
 import { fetchProductByBarcode } from "./lib/open-food-facts.js";
-import { consumeScanQuota } from "./lib/scan-limits.js";
-import { createComment, createScan, getProfile, listComments, listScans, upsertProfile } from "./lib/user-activity.js";
+import { searchPlaces } from "./lib/place-search.js";
+import { consumeScanQuota, getScanQuotaStatus } from "./lib/scan-limits.js";
+import { createComment, createScan, deleteAllScans, deleteScan, getProfile, listComments, listScans, upsertProfile } from "./lib/user-activity.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const ROOT = resolve(".");
@@ -27,23 +28,24 @@ const mime = {
 createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:5173");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   if (req.method === "OPTIONS") return sendJson(res, 204, {});
 
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
   try {
-    if (url.pathname === "/api/prices") return getPrices(req, res, url);
-    if (url.pathname === "/api/product") return getProduct(req, res, url);
-    if (url.pathname === "/api/places") return getPlaces(req, res, url);
-    if (url.pathname === "/api/community-spots") return communitySpots(req, res);
-    if (url.pathname === "/api/community-spots/confirm") return confirmSpot(req, res);
-    if (url.pathname === "/api/profile") return profile(req, res, url);
-    if (url.pathname === "/api/scans") return scans(req, res, url);
-    if (url.pathname === "/api/comments") return comments(req, res, url);
-    if (url.pathname === "/api/analyze-ingredients") return analyzeIngredients(req, res);
-    return serveStatic(res, url.pathname);
+    if (url.pathname === "/api/prices") return await getPrices(req, res, url);
+    if (url.pathname === "/api/product") return await getProduct(req, res, url);
+    if (url.pathname === "/api/scan-quota") return await getScanQuota(req, res);
+    if (url.pathname === "/api/places") return await getPlaces(req, res, url);
+    if (url.pathname === "/api/community-spots") return await communitySpots(req, res);
+    if (url.pathname === "/api/community-spots/confirm") return await confirmSpot(req, res);
+    if (url.pathname === "/api/profile") return await profile(req, res, url);
+    if (url.pathname === "/api/scans") return await scans(req, res, url);
+    if (url.pathname === "/api/comments") return await comments(req, res, url);
+    if (url.pathname === "/api/analyze-ingredients") return await analyzeIngredients(req, res);
+    return await serveStatic(res, url.pathname);
   } catch (error) {
-    return sendJson(res, 500, { error: error instanceof Error ? error.message : "Server error" });
+    return sendJson(res, 500, { error: getErrorMessage(error, "Server error") });
   }
 }).listen(PORT, "0.0.0.0", () => {
   console.log(`Veggie Navigator listening on port ${PORT}`);
@@ -97,9 +99,24 @@ async function getProduct(req, res, url) {
   return sendJson(res, 200, { product, quota });
 }
 
+async function getScanQuota(req, res) {
+  if (req.method !== "GET") return sendJson(res, 405, { error: "GET required" });
+  try {
+    return sendJson(res, 200, { quota: await getScanQuotaStatus(req) });
+  } catch (error) {
+    return sendJson(res, error.status || 500, {
+      error: error.message || "Scan-Limit konnte nicht geladen werden.",
+      quota: error.quota
+    });
+  }
+}
+
 async function communitySpots(req, res) {
   if (req.method === "GET") {
-    const items = await listCommunitySpots();
+    const url = new URL(req.url || "/", `http://${req.headers.host}`);
+    const userId = url.searchParams.get("userId")?.trim() || "";
+    const guestId = url.searchParams.get("guestId")?.trim() || "";
+    const items = await listCommunitySpots(userId, guestId);
     return sendJson(res, 200, { items });
   }
 
@@ -116,7 +133,8 @@ async function confirmSpot(req, res) {
   if (req.method !== "POST") return sendJson(res, 405, { error: "POST required" });
   const body = await readBody(req);
   if (!body.id) return sendJson(res, 400, { error: "id missing" });
-  const item = await confirmCommunitySpot(body.id);
+  if (!body.userId && !body.guestId) return sendJson(res, 400, { error: "Bestaetigung nicht zuordenbar." });
+  const item = await confirmCommunitySpot(body.id, body.userId, body.guestId);
   return sendJson(res, 200, { item });
 }
 
@@ -137,7 +155,15 @@ async function scans(req, res, url) {
     return sendJson(res, 200, { items: await listScans(userId) });
   }
   if (req.method === "POST") return sendJson(res, 201, { item: await createScan(await readBody(req)) });
-  return sendJson(res, 405, { error: "GET or POST required" });
+  if (req.method === "DELETE") {
+    const userId = url.searchParams.get("userId")?.trim();
+    if (!userId) return sendJson(res, 400, { error: "userId missing" });
+    if (url.searchParams.get("all") === "true") return sendJson(res, 200, await deleteAllScans(userId));
+    const scanId = url.searchParams.get("scanId")?.trim();
+    if (!scanId) return sendJson(res, 400, { error: "scanId missing" });
+    return sendJson(res, 200, await deleteScan({ userId, scanId }));
+  }
+  return sendJson(res, 405, { error: "GET, POST or DELETE required" });
 }
 
 async function comments(req, res, url) {
@@ -153,89 +179,7 @@ async function comments(req, res, url) {
 async function getPlaces(_req, res, url) {
   const q = url.searchParams.get("q")?.trim();
   if (!q || q.length < 2) return sendJson(res, 200, { items: [] });
-
-  if (process.env.GOOGLE_MAPS_API_KEY) {
-    const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
-        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.types"
-      },
-      body: JSON.stringify({ textQuery: q, pageSize: 8, regionCode: "DE" })
-    });
-    if (!response.ok) return sendJson(res, response.status, { error: "Google Places request failed" });
-    const data = await response.json();
-    return sendJson(res, 200, {
-      provider: "Google Places",
-      items: (data.places || []).map((place) => ({
-        id: place.id,
-        name: place.displayName?.text || "Unbenannter Ort",
-        address: place.formattedAddress || "",
-        lat: place.location?.latitude,
-        lng: place.location?.longitude,
-        types: place.types || [],
-        provider: "Google Places"
-      }))
-    });
-  }
-
-  const params = new URLSearchParams({
-    q: `${q} Germany`,
-    format: "jsonv2",
-    addressdetails: "1",
-    limit: "8"
-  });
-  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-    headers: {
-      "User-Agent": "VeggieNavigatorMVP/0.1",
-      "Accept-Language": "de"
-    }
-  });
-  if (!response.ok) return getPhotonPlaces(res, q);
-  const data = await response.json();
-  return sendJson(res, 200, {
-    provider: "OpenStreetMap Nominatim",
-    items: data.map((place) => ({
-      id: `${place.osm_type}-${place.osm_id}`,
-      name: place.name || place.display_name?.split(",")[0] || "Unbenannter Ort",
-      address: place.display_name,
-      lat: Number(place.lat),
-      lng: Number(place.lon),
-      types: [place.category, place.type].filter(Boolean),
-      provider: "OpenStreetMap Nominatim"
-    }))
-  });
-}
-
-async function getPhotonPlaces(res, q) {
-  const params = new URLSearchParams({
-    q: `${q} Germany`,
-    limit: "8",
-    lang: "de"
-  });
-  const response = await fetch(`https://photon.komoot.io/api/?${params}`, {
-    headers: { "User-Agent": "VeggieNavigatorMVP/0.1" }
-  });
-  if (!response.ok) return sendJson(res, response.status, { error: "Standortsuche gerade nicht erreichbar." });
-  const data = await response.json();
-  return sendJson(res, 200, {
-    provider: "Photon / OpenStreetMap",
-    items: (data.features || []).map((feature) => {
-      const props = feature.properties || {};
-      const coords = feature.geometry?.coordinates || [];
-      const parts = [props.street, props.housenumber, props.postcode, props.city, props.country].filter(Boolean);
-      return {
-        id: props.osm_id ? `${props.osm_type || "osm"}-${props.osm_id}` : `${props.name}-${coords.join(",")}`,
-        name: props.name || props.street || "Unbenannter Ort",
-        address: parts.join(", "),
-        lat: coords[1],
-        lng: coords[0],
-        types: [props.osm_key, props.osm_value].filter(Boolean),
-        provider: "Photon / OpenStreetMap"
-      };
-    }).filter((place) => Number.isFinite(place.lat) && Number.isFinite(place.lng))
-  });
+  return sendJson(res, 200, await searchPlaces(q));
 }
 
 async function analyzeIngredients(req, res) {
@@ -319,6 +263,12 @@ async function serveStatic(res, pathname) {
 function sendJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(status === 204 ? "" : JSON.stringify(body));
+}
+
+function getErrorMessage(error, fallback) {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error) return String(error.message);
+  return fallback;
 }
 
 function readBody(req) {

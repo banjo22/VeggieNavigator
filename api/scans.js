@@ -1,4 +1,4 @@
-import { createScan, listScans } from "../lib/user-activity.js";
+import { createScan, deleteAllScans, deleteScan, listScans } from "../lib/user-activity.js";
 
 export default async function handler(req, res) {
   setCors(req, res);
@@ -16,7 +16,18 @@ export default async function handler(req, res) {
       return res.status(201).json({ item: await createScan(body) });
     }
 
-    return res.status(405).json({ error: "GET or POST required" });
+    if (req.method === "DELETE") {
+      const userId = String(req.query.userId || "").trim();
+      if (!userId) return res.status(400).json({ error: "userId missing" });
+      if (String(req.query.all || "") === "true") {
+        return res.status(200).json(await deleteAllScans(userId));
+      }
+      const scanId = String(req.query.scanId || "").trim();
+      if (!scanId) return res.status(400).json({ error: "scanId missing" });
+      return res.status(200).json(await deleteScan({ userId, scanId }));
+    }
+
+    return res.status(405).json({ error: "GET, POST or DELETE required" });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "Scans nicht erreichbar." });
   }
@@ -26,6 +37,5 @@ function setCors(req, res) {
   const origin = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
 }
-

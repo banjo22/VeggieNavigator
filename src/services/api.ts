@@ -42,7 +42,7 @@ export type ProfilePayload = {
   profileName: string;
   publicSpots: boolean;
   publicScans: boolean;
-  publicComments: boolean;
+  publicComments?: boolean;
 };
 
 export type ScanPayload = {
@@ -95,6 +95,15 @@ export type ScanQuota = {
   subjectType: "guest" | "user";
 };
 
+export async function fetchScanQuota(accessToken = ""): Promise<ScanQuota> {
+  const response = await fetch(`${API_BASE}/api/scan-quota`, {
+    headers: authHeaders(accessToken)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Scan-Limit nicht erreichbar.");
+  return data.quota;
+}
+
 export async function analyzeIngredientPhoto(imageDataUrl: string, signal?: AbortSignal, accessToken = ""): Promise<{ result: IngredientAnalysis; quota?: ScanQuota }> {
   const response = await fetch(`${API_BASE}/api/analyze-ingredients`, {
     method: "POST",
@@ -125,15 +134,19 @@ function authHeaders(accessToken = ""): Record<string, string> {
   return headers;
 }
 
-export async function searchPlaces(query: string): Promise<PlaceSuggestion[]> {
-  const response = await fetch(`${API_BASE}/api/places?q=${encodeURIComponent(query)}`);
+export async function searchPlaces(query: string, signal?: AbortSignal): Promise<PlaceSuggestion[]> {
+  const response = await fetch(`${API_BASE}/api/places?q=${encodeURIComponent(query)}`, { signal });
   if (!response.ok) throw new Error("Standortsuche gerade nicht erreichbar.");
   const data = await response.json();
   return data.items || [];
 }
 
-export async function fetchCommunitySpots() {
-  const response = await fetch(`${API_BASE}/api/community-spots`);
+export async function fetchCommunitySpots(userId = "", guestId = "") {
+  const params = new URLSearchParams();
+  if (userId) params.set("userId", userId);
+  if (guestId) params.set("guestId", guestId);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${API_BASE}/api/community-spots${query}`);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Community-Spots nicht erreichbar.");
   return data.items || [];
@@ -150,11 +163,11 @@ export async function createCommunitySpot(spot: CommunitySpotPayload) {
   return data.item;
 }
 
-export async function confirmCommunitySpot(id: number) {
+export async function confirmCommunitySpot(id: number, userId = "", guestId = "") {
   const response = await fetch(`${API_BASE}/api/community-spots/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id })
+    body: JSON.stringify({ id, userId, guestId })
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Spot konnte nicht bestaetigt werden.");
@@ -195,6 +208,24 @@ export async function saveScan(scan: ScanPayload) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Scan konnte nicht gespeichert werden.");
   return data.item;
+}
+
+export async function deleteScan(userId: string, scanId: number) {
+  const response = await fetch(`${API_BASE}/api/scans?userId=${encodeURIComponent(userId)}&scanId=${encodeURIComponent(String(scanId))}`, {
+    method: "DELETE"
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Scan konnte nicht geloescht werden.");
+  return data;
+}
+
+export async function deleteAllScans(userId: string) {
+  const response = await fetch(`${API_BASE}/api/scans?userId=${encodeURIComponent(userId)}&all=true`, {
+    method: "DELETE"
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Scans konnten nicht geloescht werden.");
+  return data;
 }
 
 export async function fetchComments(spotId: number) {

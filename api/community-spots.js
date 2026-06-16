@@ -6,7 +6,9 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === "GET") {
-      const items = await listCommunitySpots();
+      const userId = String(req.query.userId || "").trim();
+      const guestId = String(req.query.guestId || "").trim();
+      const items = await listCommunitySpots(userId, guestId);
       return res.status(200).json({ items });
     }
 
@@ -29,4 +31,3 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
 }
-
