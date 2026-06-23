@@ -11,6 +11,13 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+html,
+body,
+#root {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -22,6 +29,37 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+.profile-mobile-shell,
+.profile-mobile-panel,
+.profile-spot-card {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.profile-mobile-shell *,
+.profile-mobile-panel *,
+.profile-spot-card * {
+  min-width: 0;
+}
+
+@media (max-width: 767px) {
+  .profile-mobile-shell {
+    width: 100%;
+    max-width: calc(100vw - 2rem);
+    margin-inline: auto;
+  }
+
+  .profile-mobile-panel,
+  .profile-spot-card {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .profile-spot-card {
+    contain: layout paint;
+  }
 }
 
 .map-grid {

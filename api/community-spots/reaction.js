@@ -1,4 +1,4 @@
-import { confirmCommunitySpot } from "../../lib/community-spots.js";
+import { reactToCommunitySpot } from "../../lib/community-spots.js";
 
 export default async function handler(req, res) {
   setCors(req, res);
@@ -8,11 +8,11 @@ export default async function handler(req, res) {
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     if (!body.id) return res.status(400).json({ error: "id missing" });
-    if (!body.userId && !body.guestId) return res.status(400).json({ error: "Bestätigung nicht zuordenbar." });
-    const spot = await confirmCommunitySpot(body.id, body.userId, body.guestId);
+    if (!body.userId && !body.guestId) return res.status(400).json({ error: "Reaktion nicht zuordenbar." });
+    const spot = await reactToCommunitySpot(body.id, body.reaction, body.userId, body.guestId);
     return res.status(200).json({ item: spot });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Spot konnte nicht bestätigt werden.";
+    const message = error instanceof Error ? error.message : "Reaktion konnte nicht gespeichert werden.";
     return res.status(500).json({ error: message });
   }
 }

@@ -3,11 +3,11 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
-import { confirmCommunitySpot, createCommunitySpot, listCommunitySpots } from "./lib/community-spots.js";
+import { claimCommunitySpots, confirmCommunitySpot, createCommunitySpot, listCommunitySpots, reactToCommunitySpot } from "./lib/community-spots.js";
 import { fetchProductByBarcode } from "./lib/open-food-facts.js";
 import { searchPlaces } from "./lib/place-search.js";
 import { consumeScanQuota, getScanQuotaStatus } from "./lib/scan-limits.js";
-import { createComment, createScan, deleteAllScans, deleteScan, getProfile, listComments, listScans, upsertProfile } from "./lib/user-activity.js";
+import { createComment, createScan, deleteAllScans, deleteComment, deleteProductFavorite, deleteScan, getProfile, listComments, listProductFavorites, listScans, upsertProductFavorite, upsertProfile } from "./lib/user-activity.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const ROOT = resolve(".");
@@ -39,7 +39,9 @@ createServer(async (req, res) => {
     if (url.pathname === "/api/places") return await getPlaces(req, res, url);
     if (url.pathname === "/api/community-spots") return await communitySpots(req, res);
     if (url.pathname === "/api/community-spots/confirm") return await confirmSpot(req, res);
+    if (url.pathname === "/api/community-spots/reaction") return await reactSpot(req, res);
     if (url.pathname === "/api/profile") return await profile(req, res, url);
+    if (url.pathname === "/api/product-favorites") return await productFavorites(req, res, url);
     if (url.pathname === "/api/scans") return await scans(req, res, url);
     if (url.pathname === "/api/comments") return await comments(req, res, url);
     if (url.pathname === "/api/analyze-ingredients") return await analyzeIngredients(req, res);
@@ -90,7 +92,7 @@ async function getProduct(req, res, url) {
     quota = await consumeScanQuota(req);
   } catch (error) {
     return sendJson(res, error.status || 500, {
-      error: error.message || "Scan-Limit konnte nicht geprueft werden.",
+      error: error.message || "Scan-Limit konnte nicht geprüft werden.",
       quota: error.quota
     });
   }
@@ -126,15 +128,30 @@ async function communitySpots(req, res) {
     return sendJson(res, 201, { item });
   }
 
-  return sendJson(res, 405, { error: "GET or POST required" });
+  if (req.method === "PATCH") {
+    const body = await readBody(req);
+    const items = await claimCommunitySpots(body);
+    return sendJson(res, 200, { items });
+  }
+
+  return sendJson(res, 405, { error: "GET, POST or PATCH required" });
 }
 
 async function confirmSpot(req, res) {
   if (req.method !== "POST") return sendJson(res, 405, { error: "POST required" });
   const body = await readBody(req);
   if (!body.id) return sendJson(res, 400, { error: "id missing" });
-  if (!body.userId && !body.guestId) return sendJson(res, 400, { error: "Bestaetigung nicht zuordenbar." });
+  if (!body.userId && !body.guestId) return sendJson(res, 400, { error: "Bestätigung nicht zuordenbar." });
   const item = await confirmCommunitySpot(body.id, body.userId, body.guestId);
+  return sendJson(res, 200, { item });
+}
+
+async function reactSpot(req, res) {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "POST required" });
+  const body = await readBody(req);
+  if (!body.id) return sendJson(res, 400, { error: "id missing" });
+  if (!body.userId && !body.guestId) return sendJson(res, 400, { error: "Reaktion nicht zuordenbar." });
+  const item = await reactToCommunitySpot(body.id, body.reaction, body.userId, body.guestId);
   return sendJson(res, 200, { item });
 }
 
@@ -146,6 +163,23 @@ async function profile(req, res, url) {
   }
   if (req.method === "POST") return sendJson(res, 200, { profile: await upsertProfile(await readBody(req)) });
   return sendJson(res, 405, { error: "GET or POST required" });
+}
+
+async function productFavorites(req, res, url) {
+  if (req.method === "GET") {
+    const userId = url.searchParams.get("userId")?.trim();
+    if (!userId) return sendJson(res, 400, { error: "userId missing" });
+    return sendJson(res, 200, { items: await listProductFavorites(userId) });
+  }
+  if (req.method === "POST") return sendJson(res, 201, { item: await upsertProductFavorite(await readBody(req)) });
+  if (req.method === "DELETE") {
+    const userId = url.searchParams.get("userId")?.trim();
+    const barcode = url.searchParams.get("barcode")?.trim();
+    if (!userId) return sendJson(res, 400, { error: "userId missing" });
+    if (!barcode) return sendJson(res, 400, { error: "barcode missing" });
+    return sendJson(res, 200, await deleteProductFavorite({ userId, barcode }));
+  }
+  return sendJson(res, 405, { error: "GET, POST or DELETE required" });
 }
 
 async function scans(req, res, url) {
@@ -173,7 +207,14 @@ async function comments(req, res, url) {
     return sendJson(res, 200, { items: await listComments(spotId) });
   }
   if (req.method === "POST") return sendJson(res, 201, { item: await createComment(await readBody(req)) });
-  return sendJson(res, 405, { error: "GET or POST required" });
+  if (req.method === "DELETE") {
+    const userId = url.searchParams.get("userId")?.trim();
+    const commentId = url.searchParams.get("commentId")?.trim();
+    if (!userId) return sendJson(res, 400, { error: "userId missing" });
+    if (!commentId) return sendJson(res, 400, { error: "commentId missing" });
+    return sendJson(res, 200, await deleteComment({ userId, commentId }));
+  }
+  return sendJson(res, 405, { error: "GET, POST or DELETE required" });
 }
 
 async function getPlaces(_req, res, url) {
@@ -197,17 +238,17 @@ async function analyzeIngredients(req, res) {
     quota = await consumeScanQuota(req);
   } catch (error) {
     return sendJson(res, error.status || 500, {
-      error: error.message || "Scan-Limit konnte nicht geprueft werden.",
+      error: error.message || "Scan-Limit konnte nicht geprüft werden.",
       quota: error.quota
     });
   }
   const prompt = isMenu
     ? [
-        "Analysiere ausschliesslich die sichtbare Speisekarte in allen Bildern. Die Bilder koennen mehrere Seiten derselben Speisekarte sein.",
+        "Analysiere ausschliesslich die sichtbare Speisekarte in allen Bildern. Die Bilder können mehrere Seiten derselben Speisekarte sein.",
         "Fasse die Seiten zusammen und vermeide doppelte Gerichte.",
         "Erfinde keine Gerichte.",
         "Wenn ein Gericht nicht lesbar ist, lass es weg.",
-        "Wenn vor einem Gericht eine Nummer steht, uebernimm die Nummer zur Orientierung, z.B. '12 Pasta Arrabbiata'.",
+        "Wenn vor einem Gericht eine Nummer steht, übernimm die Nummer zur Orientierung, z.B. '12 Pasta Arrabbiata'.",
         "Gib nur kurzen deutschen Plain-Text aus, keine JSON, kein {}, keine Einleitung.",
         "Format:",
         "Vegan:",
@@ -218,7 +259,17 @@ async function analyzeIngredients(req, res) {
         "- Gericht -> Änderung, damit vegan/vegetarisch",
         "Wenn eine Kategorie leer ist: '- nichts gefunden'."
       ].join("\n")
-    : "Analysiere diese Zutatenliste fuer eine junge deutsche veggie/vegane Food-App. Antworte ausschliesslich als valides JSON ohne Markdown mit den Feldern status (vegan|vegetarisch|nicht veggie|unklar), explanation, problematicIngredients Array, confidence 0-1.";
+    : [
+        "Analysiere diese Zutatenliste für eine junge deutsche vegetarische/vegane Food-App.",
+        "Lies die sichtbaren Zutaten so vollständig wie möglich aus.",
+        "Antworte ausschliesslich als valides JSON ohne Markdown.",
+        "Pflichtfelder:",
+        "status: vegan|vegetarisch|nicht veggie|unklar",
+        "explanation: kurze deutsche Erklärung",
+        "problematicIngredients: Array der Zutaten, die für vegan/vegetarisch kritisch sind",
+        "detectedIngredients: Array aller gut lesbaren sichtbaren Zutaten, auch wenn sie nicht kritisch sind, z.B. Weizenmehl, Haferflocken, Gerstenmalzextrakt",
+        "confidence: Zahl 0-1"
+      ].join("\n");
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -229,7 +280,7 @@ async function analyzeIngredients(req, res) {
     },
     body: JSON.stringify({
       model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-      max_output_tokens: isMenu ? 650 : 350,
+      max_output_tokens: isMenu ? 650 : 550,
       input: [{
         role: "user",
         content: [
@@ -246,7 +297,7 @@ async function analyzeIngredients(req, res) {
   const data = await response.json();
   if (!response.ok) return sendJson(res, response.status, { error: data.error?.message || "OpenAI request failed" });
   const text = extractResponseText(data);
-  if (!text) return sendJson(res, 502, { error: "OpenAI hat keine lesbare Analyse zurueckgegeben. Bitte Bild erneut versuchen." });
+  if (!text) return sendJson(res, 502, { error: "OpenAI hat keine lesbare Analyse zurückgegeben. Bitte Bild erneut versuchen." });
   if (isMenu) return sendJson(res, 200, { result: { text }, raw: text, source: "OpenAI Responses API", quota });
   return sendJson(res, 200, { result: safeJson(text), raw: text, source: "OpenAI Responses API", quota });
 }
@@ -297,6 +348,7 @@ function safeJson(text) {
       status: "unklar",
       explanation: text || "Keine auswertbare Antwort erhalten.",
       problematicIngredients: [],
+      detectedIngredients: [],
       confidence: 0
     };
   }

@@ -22,18 +22,18 @@ export default async function handler(req, res) {
       quota = await consumeScanQuota(req);
     } catch (error) {
       return res.status(error.status || 500).json({
-        error: error.message || "Scan-Limit konnte nicht geprueft werden.",
+        error: error.message || "Scan-Limit konnte nicht geprüft werden.",
         quota: error.quota
       });
     }
 
     const prompt = isMenu
       ? [
-          "Analysiere ausschliesslich die sichtbare Speisekarte in allen Bildern. Die Bilder koennen mehrere Seiten derselben Speisekarte sein.",
+          "Analysiere ausschliesslich die sichtbare Speisekarte in allen Bildern. Die Bilder können mehrere Seiten derselben Speisekarte sein.",
           "Fasse die Seiten zusammen und vermeide doppelte Gerichte.",
           "Erfinde keine Gerichte.",
           "Wenn ein Gericht nicht lesbar ist, lass es weg.",
-          "Wenn vor einem Gericht eine Nummer steht, uebernimm die Nummer zur Orientierung, z.B. '12 Pasta Arrabbiata'.",
+          "Wenn vor einem Gericht eine Nummer steht, übernimm die Nummer zur Orientierung, z.B. '12 Pasta Arrabbiata'.",
           "Gib nur kurzen deutschen Plain-Text aus, keine JSON, kein {}, keine Einleitung.",
           "Format:",
           "Vegan:",
@@ -44,7 +44,17 @@ export default async function handler(req, res) {
           "- Gericht -> Aenderung, damit vegan/vegetarisch",
           "Wenn eine Kategorie leer ist: '- nichts gefunden'."
         ].join("\n")
-      : "Analysiere diese Zutatenliste fuer eine junge deutsche veggie/vegane Food-App. Antworte ausschliesslich als valides JSON ohne Markdown mit den Feldern status (vegan|vegetarisch|nicht veggie|unklar), explanation, problematicIngredients Array, confidence 0-1.";
+      : [
+          "Analysiere diese Zutatenliste für eine junge deutsche vegetarische/vegane Food-App.",
+          "Lies die sichtbaren Zutaten so vollständig wie möglich aus.",
+          "Antworte ausschliesslich als valides JSON ohne Markdown.",
+          "Pflichtfelder:",
+          "status: vegan|vegetarisch|nicht veggie|unklar",
+          "explanation: kurze deutsche Erklärung",
+          "problematicIngredients: Array der Zutaten, die für vegan/vegetarisch kritisch sind",
+          "detectedIngredients: Array aller gut lesbaren sichtbaren Zutaten, auch wenn sie nicht kritisch sind, z.B. Weizenmehl, Haferflocken, Gerstenmalzextrakt",
+          "confidence: Zahl 0-1"
+        ].join("\n");
 
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -55,7 +65,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        max_output_tokens: isMenu ? 650 : 350,
+        max_output_tokens: isMenu ? 650 : 550,
         input: [{
           role: "user",
           content: [
@@ -70,7 +80,7 @@ export default async function handler(req, res) {
     if (!response.ok) return res.status(response.status).json({ error: data.error?.message || "OpenAI request failed" });
 
     const text = extractResponseText(data);
-    if (!text) return res.status(502).json({ error: "OpenAI hat keine lesbare Analyse zurueckgegeben. Bitte Bild erneut versuchen." });
+    if (!text) return res.status(502).json({ error: "OpenAI hat keine lesbare Analyse zurückgegeben. Bitte Bild erneut versuchen." });
     if (isMenu) return res.status(200).json({ result: { text }, raw: text, source: "OpenAI Responses API", quota });
     return res.status(200).json({ result: safeJson(text), raw: text, source: "OpenAI Responses API", quota });
   } catch (error) {
@@ -89,6 +99,7 @@ function safeJson(text) {
       status: "unklar",
       explanation: text || "Keine auswertbare Antwort erhalten.",
       problematicIngredients: [],
+      detectedIngredients: [],
       confidence: 0
     };
   }

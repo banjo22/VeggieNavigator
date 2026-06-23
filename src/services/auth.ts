@@ -19,6 +19,8 @@ export type AuthUser = User;
 
 export async function getCurrentUser() {
   if (!supabase) return null;
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (sessionData.session?.user) return sessionData.session.user;
   const { data, error } = await supabase.auth.getUser();
   if (error) return null;
   return data.user;
@@ -28,7 +30,8 @@ export async function getAccessToken() {
   if (!supabase) return "";
   const { data, error } = await supabase.auth.getSession();
   if (error) return "";
-  return data.session?.access_token || "";
+  const token = data.session?.access_token || "";
+  return token.length > 16_000 ? "" : token;
 }
 
 export function onAuthChange(callback: (user: AuthUser | null) => void) {
@@ -80,6 +83,18 @@ export async function updateProfileName(profileName: string) {
     data: {
       profile_name: profileName,
       full_name: profileName
+    }
+  });
+  if (error) throw error;
+  return data.user;
+}
+
+export async function clearProfileAvatarMetadata() {
+  if (!supabase) throw new Error("Supabase Auth ist nicht konfiguriert.");
+  const { data, error } = await supabase.auth.updateUser({
+    data: {
+      avatar_url: "",
+      picture: ""
     }
   });
   if (error) throw error;

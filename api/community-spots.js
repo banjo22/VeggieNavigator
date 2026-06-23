@@ -1,4 +1,4 @@
-import { createCommunitySpot, listCommunitySpots } from "../lib/community-spots.js";
+import { claimCommunitySpots, createCommunitySpot, listCommunitySpots } from "../lib/community-spots.js";
 
 export default async function handler(req, res) {
   setCors(req, res);
@@ -18,7 +18,13 @@ export default async function handler(req, res) {
       return res.status(201).json({ item: spot });
     }
 
-    return res.status(405).json({ error: "GET or POST required" });
+    if (req.method === "PATCH") {
+      const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+      const items = await claimCommunitySpots(body);
+      return res.status(200).json({ items });
+    }
+
+    return res.status(405).json({ error: "GET, POST or PATCH required" });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Community-Spots nicht erreichbar.";
     return res.status(500).json({ error: message });
@@ -29,5 +35,5 @@ function setCors(req, res) {
   const origin = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
 }

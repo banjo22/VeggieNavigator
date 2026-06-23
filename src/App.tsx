@@ -1,11 +1,12 @@
-import { Camera, Check, Coffee, Crown, Home, Loader2, LogIn, MapPinned, MenuSquare, Plus, ScanLine, Search, ShoppingBag, Sparkles, Star, Store, Trash2, UploadCloud, Utensils, UserRound, X } from "lucide-react";
+import { AlertTriangle, Camera, Check, Coffee, Crown, Heart, Home, Loader2, LogIn, MapPinned, MenuSquare, Plus, ScanLine, Search, ShieldCheck, ShoppingBag, Sparkles, Star, Store, ThumbsDown, ThumbsUp, Trash2, UploadCloud, Utensils, UserRound, X } from "lucide-react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { FormEvent, useEffect, useRef, useState } from "react";
-import type { ChangeEvent, ReactNode } from "react";
+import type { ChangeEvent, MouseEvent, ReactNode } from "react";
 import {
   analyzeMenuPhoto,
   analyzeIngredientPhoto,
+  claimCommunitySpots,
   confirmCommunitySpot as saveSpotConfirmation,
   createCommunitySpot as saveCommunitySpot,
   deleteAllScans as deleteAllRemoteScans,
@@ -13,12 +14,17 @@ import {
   fetchComments,
   fetchCommunitySpots,
   fetchProfile,
+  fetchProductFavorites,
   fetchPriceOptions,
   fetchProductByBarcode,
   fetchScanQuota,
   fetchScans,
+  deleteComment as deleteRemoteComment,
+  deleteProductFavorite as deleteRemoteProductFavorite,
+  reactToCommunitySpot as saveSpotReaction,
   saveComment,
   saveProfile as saveUserProfile,
+  saveProductFavorite,
   saveScan,
   searchPlaces,
   type CommentPayload,
@@ -33,16 +39,16 @@ import {
   categories,
   featureCards,
   initialFinds,
-  pricing,
   recommendations,
   type CommunitySpot,
   type VeggieStatus
 } from "./data/mockData";
-import { authConfigured, getAccessToken, getCurrentUser, logout, onAuthChange, signInWithOAuth, signInWithPassword, signUpWithPassword, updateProfileName, type AuthUser } from "./services/auth";
+import { authConfigured, clearProfileAvatarMetadata, getAccessToken, getCurrentUser, logout, onAuthChange, signInWithOAuth, signInWithPassword, signUpWithPassword, updateProfileName, type AuthUser } from "./services/auth";
 import type { ProductResult } from "./services/openFoodFacts";
 
 type Screen = "home" | "scanner" | "map" | "add" | "pricing" | "profile";
-type Find = CommunitySpot & { confirmations?: number; viewerConfirmed?: boolean };
+type AppRoute = { screen: Screen; spotId?: number };
+type Find = CommunitySpot & { confirmations?: number; viewerConfirmed?: boolean; likeCount?: number; dislikeCount?: number; viewerReaction?: SpotReaction | "" };
 type BarcodeResult = { rawValue: string };
 type UserLocation = { lat: number; lng: number };
 type ScanHistoryItem =
@@ -50,14 +56,42 @@ type ScanHistoryItem =
   | { id: number; type: "ingredients"; title: string; subtitle: string; photo: string; analysis: IngredientAnalysis }
   | { id: number; type: "menu"; title: string; subtitle: string; photo: string; text: string };
 type ScanRow = { id: number; type: string; title: string; subtitle: string; payload?: unknown };
-type SpotComment = { id: number; author: string; text: string; createdAt: string };
+type SpotComment = { id: number; userId?: string; author: string; text: string; createdAt: string; parentId?: number | null };
 type ProfilePrivacy = { publicSpots: boolean; publicScans: boolean };
+type PremiumState = { isPremium: boolean; status: string; plan: string; premiumUntil: string | null };
+type MapFilterId = "all" | "vegan" | "vegetarian" | "cheap" | "confirmed" | "photo";
+type SpotReaction = "like" | "dislike";
+type DietMode = "vegan" | "vegetarisch" | "flexitarisch";
+type DietaryPreferences = { diet: DietMode; warnings: string[] };
+type FavoriteProduct = { barcode: string; name: string; status: VeggieStatus; imageUrl?: string; reason: string; createdAt: string };
 
 const SCAN_HISTORY_STORAGE_KEY = "veggie-navigator-scan-history";
 const SCAN_HISTORY_LIMIT = 10;
 const PROFILE_PRIVACY_STORAGE_KEY = "veggie-navigator-profile-privacy";
+const DIETARY_PREFERENCES_STORAGE_KEY = "veggie-navigator-dietary-preferences";
+const PRODUCT_FAVORITES_STORAGE_KEY = "veggie-navigator-product-favorites";
 const GUEST_DAILY_SCAN_LIMIT = 3;
 const USER_DAILY_SCAN_LIMIT = 5;
+const FREE_PREMIUM_STATE: PremiumState = { isPremium: false, status: "free", plan: "free", premiumUntil: null };
+const DEFAULT_DIETARY_PREFERENCES: DietaryPreferences = { diet: "vegan", warnings: ["milch", "ei", "gelatine", "honig"] };
+const warningOptions = [
+  { id: "milch", label: "Milch" },
+  { id: "ei", label: "Ei" },
+  { id: "gelatine", label: "Gelatine" },
+  { id: "honig", label: "Honig" },
+  { id: "palmöl", label: "Palmöl" },
+  { id: "gluten", label: "Gluten" },
+  { id: "nüsse", label: "Nüsse" },
+  { id: "soja", label: "Soja" }
+];
+const mapFilters: Array<{ id: MapFilterId; label: string }> = [
+  { id: "all", label: "Alle" },
+  { id: "vegan", label: "Vegan" },
+  { id: "vegetarian", label: "Vegetarisch" },
+  { id: "cheap", label: "Günstig" },
+  { id: "confirmed", label: "Bestätigt" },
+  { id: "photo", label: "Mit Foto" }
+];
 
 declare global {
   interface Window {
@@ -70,34 +104,67 @@ declare global {
 const navItems: Array<{ screen: Screen; label: string; icon: typeof Home }> = [
   { screen: "home", label: "Home", icon: Home },
   { screen: "scanner", label: "Scanner", icon: ScanLine },
-  { screen: "add", label: "Hinzufuegen", icon: Plus },
+  { screen: "add", label: "Hinzufügen", icon: Plus },
   { screen: "map", label: "Karte", icon: MapPinned },
   { screen: "profile", label: "Profil", icon: UserRound }
 ];
+
+const screenPaths: Record<Screen, string> = {
+  home: "/",
+  scanner: "/scanner",
+  map: "/karte",
+  add: "/hinzufuegen",
+  pricing: "/premium",
+  profile: "/profil"
+};
+
+function getRouteFromLocation(): AppRoute {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const spotMatch = path.match(/^\/spots\/(\d+)$/);
+  if (spotMatch) return { screen: "map", spotId: Number(spotMatch[1]) };
+  if (path === "/scanner") return { screen: "scanner" };
+  if (path === "/karte" || path === "/spots") return { screen: "map" };
+  if (path === "/hinzufuegen" || path === "/hinzuf%C3%BCgen" || path === "/hinzufügen") return { screen: "add" };
+  if (path === "/premium") return { screen: "pricing" };
+  if (path === "/profil") return { screen: "profile" };
+  return { screen: "home" };
+}
+
+function pathForScreen(screen: Screen) {
+  return screenPaths[screen] || "/";
+}
 
 const statusStyles: Record<VeggieStatus, string> = {
   vegan: "bg-leaf text-white",
   vegetarisch: "bg-honey text-ink",
   "nicht veggie": "bg-tomato text-white",
-  "vegan moeglich": "bg-sage text-moss"
+  "vegan möglich": "bg-sage text-moss"
+};
+
+const statusLabels: Record<string, string> = {
+  vegan: "vegan",
+  vegetarisch: "vegetarisch",
+  "nicht veggie": "nicht geeignet",
+  "vegan möglich": "vegan möglich",
+  unklar: "unklar"
 };
 
 function Badge({ status }: { status: VeggieStatus }) {
-  return <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusStyles[status]}`}>{status}</span>;
+  return <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusStyles[status]}`}>{statusLabels[status] || status}</span>;
 }
 
 function FindIcon({ category, size = 18 }: { category: string; size?: number }) {
-  if (category === "Restaurants") return <Utensils size={size} />;
-  if (category === "Supermarkt-Spots") return <Store size={size} />;
-  if (category === "Suesses") return <Coffee size={size} />;
-  if (category === "Guenstig") return <ShoppingBag size={size} />;
+  if (category === "Restaurant") return <Utensils size={size} />;
+  if (category === "Supermarkt") return <Store size={size} />;
+  if (category === "Café & Bäckerei") return <Coffee size={size} />;
+  if (category === "Imbiss" || category === "Mensa/Kantine" || category === "Lieferdienst") return <ShoppingBag size={size} />;
   return <Star size={size} />;
 }
 
 function Shell({ screen, setScreen, children }: { screen: Screen; setScreen: (screen: Screen) => void; children: ReactNode }) {
   return (
     <div className="min-h-screen bg-cream pb-24 text-ink md:pb-0">
-      <div className="mx-auto flex max-w-6xl md:min-h-screen">
+      <div className="mx-auto flex w-full max-w-full md:min-h-screen md:max-w-6xl">
         <aside className="hidden w-64 border-r border-oat/80 px-5 py-8 md:block">
           <button onClick={() => setScreen("home")} className="mb-10 flex items-center gap-3 text-left">
             <span className="grid size-11 place-items-center rounded-2xl bg-moss text-white"><Sparkles size={20} /></span>
@@ -117,7 +184,7 @@ function Shell({ screen, setScreen, children }: { screen: Screen; setScreen: (sc
             <Crown size={18} /> Premium
           </button>
         </aside>
-        <main className="w-full px-4 py-5 sm:px-6 md:px-8 md:py-8">{children}</main>
+        <main className="box-border w-full min-w-0 max-w-full overflow-x-hidden px-4 py-5 sm:px-6 md:px-8 md:py-8">{children}</main>
       </div>
       <nav className="fixed inset-x-3 bottom-3 z-20 grid grid-cols-5 rounded-3xl bg-white/95 p-2 shadow-soft backdrop-blur md:hidden">
         {navItems.map(({ screen: itemScreen, label, icon: Icon }) => (
@@ -142,10 +209,11 @@ function Header({ eyebrow, title, action }: { eyebrow: string; title: string; ac
   );
 }
 
-function HomeScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
+function HomeScreen({ setScreen, user }: { setScreen: (screen: Screen) => void; user: AuthUser | null }) {
+  const name = user ? getUserDisplayName(user) : "";
   return (
     <>
-      <Header eyebrow="Hallo Nils" title="Entdecken, pruefen, teilen." />
+      <Header eyebrow={name ? `Hallo ${name}` : "Hallo"} title="Entdecken, prüfen, teilen." />
       <button onClick={() => setScreen("scanner")} className="mb-5 w-full rounded-3xl bg-moss p-6 text-left text-white shadow-soft">
         <div className="flex items-start gap-4">
           <span className="grid size-14 shrink-0 place-items-center rounded-2xl bg-white text-moss"><ScanLine size={28} /></span>
@@ -183,14 +251,14 @@ function HomeScreen({ setScreen }: { setScreen: (screen: Screen) => void }) {
         <div className="rounded-3xl bg-white p-5 shadow-soft">
           <LogIn className="mb-4 text-moss" />
           <h2 className="text-xl font-bold">Ohne Account starten</h2>
-          <p className="mt-2 text-sm leading-6 text-ink/65">Ein Login ist nur fuer gespeicherte Lieblingsspots und spaetere Sync-Funktionen gedacht. Beitraege sollen nicht hinter Premium liegen.</p>
+          <p className="mt-2 text-sm leading-6 text-ink/65">Ein Login ist nur für gespeicherte Lieblingsspots und spätere Sync-Funktionen gedacht. Beiträge sollen nicht hinter Premium liegen.</p>
         </div>
       </section>
     </>
   );
 }
 
-function ScannerScreen({ user }: { user: AuthUser | null }) {
+function ScannerScreen({ user, premium, setPremium, dietaryPreferences, favoriteProducts, toggleFavoriteProduct }: { user: AuthUser | null; premium: PremiumState; setPremium: (premium: PremiumState) => void; dietaryPreferences: DietaryPreferences; favoriteProducts: FavoriteProduct[]; toggleFavoriteProduct: (product: ProductResult) => void }) {
   const [scanMode, setScanMode] = useState<"ingredients" | "menu">("ingredients");
   const [barcode, setBarcode] = useState("");
   const [product, setProduct] = useState<ProductResult | null>(null);
@@ -234,13 +302,14 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     video.srcObject = photoStreamRef.current;
     void video.play().catch(() => {
       const setter = scanMode === "ingredients" ? setIngredientMessage : setMenuMessage;
-      setter("Kamera konnte nicht gestartet werden. Bitte Browser-Berechtigung pruefen.");
+      setter("Kamera konnte nicht gestartet werden. Bitte Browser-Berechtigung prüfen.");
     });
   }, [photoCameraActive, scanMode]);
 
   useEffect(() => {
-    saveScanHistory(scanHistory, user?.id);
-  }, [scanHistory, user?.id]);
+    if (user) return;
+    saveScanHistory(scanHistory);
+  }, [scanHistory, user]);
 
   useEffect(() => {
     let active = true;
@@ -275,16 +344,25 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     let active = true;
     setQuotaMessage("");
     void getAccessToken().then((token) => fetchScanQuota(token)).then((quota) => {
-      if (active) setScanQuota(quota);
+      if (!active) return;
+      applyQuota(quota);
     }).catch((error) => {
       if (!active) return;
       console.warn(error);
-      setQuotaMessage("Scan-Limit konnte gerade nicht geladen werden.");
+      if (error instanceof Error && error.message.includes("leer geantwortet")) return;
+      setQuotaMessage(error instanceof Error ? error.message : "Scan-Limit konnte gerade nicht geladen werden.");
     });
     return () => {
       active = false;
     };
   }, [user?.id]);
+
+  function applyQuota(quota?: ScanQuota) {
+    if (!quota) return;
+    setScanQuota(quota);
+    setQuotaMessage("");
+    setPremium({ isPremium: Boolean(quota.premium), status: quota.premiumStatus || "free", plan: quota.premiumPlan || "free", premiumUntil: quota.premiumUntil || null });
+  }
 
   async function scanProduct(code = barcode) {
     const cleanedCode = code.trim();
@@ -298,7 +376,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     setIngredientMessage("");
     try {
       const { product: result, quota } = await fetchProductByBarcode(cleanedCode, await getAccessToken());
-      if (quota) setScanQuota(quota);
+      applyQuota(quota);
       if (result) {
         setProduct(result);
         addScanHistory({
@@ -311,7 +389,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
         });
         void loadPrices(cleanedCode);
       } else {
-        setIngredientMessage("Kein Open-Food-Facts-Eintrag gefunden. In so einem Fall waere ein Zutatenfoto besser.");
+        setIngredientMessage("Kein Open-Food-Facts-Eintrag gefunden. In so einem Fall wäre ein Zutatenfoto besser.");
       }
     } catch (error) {
       setIngredientMessage(error instanceof Error ? error.message : "Produktdaten nicht erreichbar.");
@@ -334,11 +412,11 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
 
   async function startCameraScan() {
     if (!window.BarcodeDetector) {
-      setIngredientMessage("Dein Browser unterstuetzt Barcode-Scan per Kamera nicht. Du kannst den Barcode eintippen oder ein Zutatenfoto hochladen.");
+      setIngredientMessage("Dein Browser unterstützt Barcode-Scan per Kamera nicht. Du kannst den Barcode eintippen oder ein Zutatenfoto hochladen.");
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      setIngredientMessage("Kamerazugriff ist in diesem Browser nicht verfuegbar.");
+      setIngredientMessage("Kamerazugriff ist in diesem Browser nicht verfügbar.");
       return;
     }
 
@@ -379,7 +457,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
   async function startPhotoCamera() {
     if (!navigator.mediaDevices?.getUserMedia) {
       const setter = scanMode === "ingredients" ? setIngredientMessage : setMenuMessage;
-      setter("Kamerazugriff ist in diesem Browser nicht verfuegbar.");
+      setter("Kamerazugriff ist in diesem Browser nicht verfügbar.");
       return;
     }
 
@@ -423,7 +501,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
       void runIngredientAnalysis(imageDataUrl);
     } else {
       setMenuPhotos((current) => [...current, imageDataUrl].slice(0, 8));
-      setMenuMessage("Seite hinzugefuegt. Du kannst weitere Seiten fotografieren oder analysieren.");
+      setMenuMessage("Seite hinzugefügt. Du kannst weitere Seiten fotografieren oder analysieren.");
     }
   }
 
@@ -444,7 +522,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
 
     void readImageFiles(files.slice(0, 8 - menuPhotos.length)).then((images) => {
       setMenuPhotos((current) => [...current, ...images].slice(0, 8));
-      setMenuMessage(`${images.length} Seite${images.length === 1 ? "" : "n"} hinzugefuegt.`);
+      setMenuMessage(`${images.length} Seite${images.length === 1 ? "" : "n"} hinzugefügt.`);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }).catch(() => setMenuMessage("Bilder konnten nicht gelesen werden."));
   }
@@ -460,7 +538,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     setIngredientMessage("KI analysiert die Zutatenliste.");
     try {
       const { result, quota } = await analyzeIngredientPhoto(imageDataUrl, controller.signal, await getAccessToken());
-      if (quota) setScanQuota(quota);
+      applyQuota(quota);
       setAnalysis(result);
       addScanHistory({
         id: Date.now(),
@@ -496,7 +574,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     setMenuMessage("Speisekarte wird analysiert.");
     try {
       const { text: result, quota } = await analyzeMenuPhoto(images, controller.signal, await getAccessToken());
-      if (quota) setScanQuota(quota);
+      applyQuota(quota);
       setMenuText(result);
       addScanHistory({
         id: Date.now(),
@@ -606,7 +684,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     if (user) {
       void deleteRemoteScan(user.id, id).catch((error) => {
         console.warn(error);
-        setHistoryMessage("Scan wurde lokal entfernt, aber noch nicht in Supabase geloescht.");
+        setHistoryMessage("Scan wurde lokal entfernt, aber noch nicht in Supabase gelöscht.");
       });
     }
   }
@@ -616,12 +694,13 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
     if (user) {
       void deleteAllRemoteScans(user.id).catch((error) => {
         console.warn(error);
-        setHistoryMessage("Scans wurden lokal entfernt, aber noch nicht in Supabase geloescht.");
+        setHistoryMessage("Scans wurden lokal entfernt, aber noch nicht in Supabase gelöscht.");
       });
     }
   }
 
   const hasCurrentScan = scanMode === "ingredients" ? Boolean(ingredientPhoto || analysis || analysisLoading) : Boolean(menuPhotos.length || menuText || menuLoading);
+  const isPremium = premium.isPremium || Boolean(scanQuota?.premium);
   const dailyScanLimit = scanQuota?.limit ?? (user ? USER_DAILY_SCAN_LIMIT : GUEST_DAILY_SCAN_LIMIT);
   const shownRemainingScans = scanQuota ? scanQuota.remaining : dailyScanLimit;
 
@@ -633,9 +712,9 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-oat bg-cream px-4 py-3">
             <div>
               <p className="text-sm font-bold text-moss">Scans heute</p>
-              <p className="text-xs leading-5 text-ink/55">{user ? "Eingeloggt: 5 pro Tag" : "Ohne Login: 3 pro Tag"}</p>
+              <p className="text-xs leading-5 text-ink/55">{isPremium ? "Premium: unbegrenzt" : user ? "Eingeloggt: 5 pro Tag" : "Ohne Login: 3 pro Tag"}</p>
             </div>
-            <span className="rounded-2xl bg-white px-4 py-2 text-sm font-black text-ink">{shownRemainingScans}/{dailyScanLimit} uebrig</span>
+            <span className="rounded-2xl bg-white px-4 py-2 text-sm font-black text-ink">{isPremium ? "Unbegrenzt" : `${shownRemainingScans}/${dailyScanLimit} übrig`}</span>
             {quotaMessage && <p className="w-full text-xs font-bold text-tomato">{quotaMessage}</p>}
           </div>
           <div className="mb-4 grid grid-cols-2 gap-2 rounded-3xl bg-cream p-2">
@@ -654,7 +733,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
                   </button>
                   <input value={barcode} onChange={(event) => setBarcode(event.target.value)} inputMode="numeric" className="min-w-0 flex-1 rounded-2xl bg-white px-4 py-3 text-center font-bold outline-none focus:ring-2 focus:ring-moss" aria-label="Barcode" placeholder="Barcode eingeben" />
                   <button onClick={() => scanProduct()} disabled={loading} className="inline-flex flex-1 items-center justify-center rounded-2xl bg-ink px-5 py-3 font-bold text-white shadow-soft disabled:opacity-60">
-                    {loading ? <Loader2 className="mr-2 animate-spin" size={18} /> : <Search className="mr-2" size={18} />} Pruefen
+                    {loading ? <Loader2 className="mr-2 animate-spin" size={18} /> : <Search className="mr-2" size={18} />} Prüfen
                   </button>
                 </div>
                 <video ref={videoRef} className={`mt-4 aspect-video w-full rounded-3xl bg-ink object-cover ${cameraActive ? "block" : "hidden"}`} muted playsInline />
@@ -666,7 +745,7 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
                 <UploadCloud />
               </div>
               <span className="mt-3 block text-lg font-bold">{scanMode === "ingredients" ? "Zutatenliste fotografieren" : "Speisekarte fotografieren"}</span>
-              <span className="mx-auto mt-1 block max-w-lg text-sm leading-6 text-ink/55">{scanMode === "ingredients" ? "Ein Foto reicht meistens. Die KI prueft die sichtbaren Zutaten." : "Fuege mehrere Seiten hinzu, wenn die Speisekarte laenger ist. Du siehst jede Seite unten als Vorschau."}</span>
+              <span className="mx-auto mt-1 block max-w-lg text-sm leading-6 text-ink/55">{scanMode === "ingredients" ? "Ein Foto reicht meistens. Die KI prüft die sichtbaren Zutaten." : "Füge mehrere Seiten hinzu, wenn die Speisekarte länger ist. Du siehst jede Seite unten als Vorschau."}</span>
               <div className="mt-4 grid gap-2 sm:grid-cols-2">
                 <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex items-center justify-center rounded-2xl bg-ink px-5 py-3 font-bold text-white shadow-soft">
                   <UploadCloud className="mr-2" size={18} /> Datei hochladen
@@ -682,14 +761,15 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
                 <video ref={photoVideoRef} className="aspect-video w-full rounded-2xl bg-ink object-cover" muted playsInline />
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <button onClick={capturePhoto} className="rounded-2xl bg-moss px-4 py-3 font-bold text-white">Foto aufnehmen</button>
-                  <button onClick={stopPhotoCamera} className="rounded-2xl bg-cream px-4 py-3 font-bold text-ink/70">Schliessen</button>
+                  <button onClick={stopPhotoCamera} className="rounded-2xl bg-cream px-4 py-3 font-bold text-ink/70">Schließen</button>
                 </div>
               </div>
             )}
             {scanMode === "ingredients" && ingredientPhoto && <img src={ingredientPhoto} alt="Zutatenfoto Vorschau" className="mt-4 max-h-52 w-full rounded-3xl object-cover" />}
             {scanMode === "menu" && menuPhotos.length > 0 && <MenuPhotoStrip photos={menuPhotos} removePhoto={(index) => setMenuPhotos((current) => current.filter((_, photoIndex) => photoIndex !== index))} analyze={() => void runMenuAnalysis()} loading={menuLoading} />}
             {((scanMode === "ingredients" && analysisLoading) || (scanMode === "menu" && menuLoading)) && <LoadingAnalysis label={scanMode === "ingredients" ? "Zutaten werden gecheckt" : "Speisekarte wird gecheckt"} onCancel={cancelAnalysis} />}
-            {scanMode === "ingredients" && analysis && <AnalysisBox title="KI-Ergebnis" badge={analysis.status}><p>{analysis.explanation}</p>{analysis.problematicIngredients?.length > 0 && <p className="mt-2 font-semibold text-tomato">Kritisch: {analysis.problematicIngredients.join(", ")}</p>}</AnalysisBox>}
+            {scanMode === "ingredients" && product && <div className="mt-4 rounded-3xl bg-white p-4 text-left"><ProductResultCard product={product} prices={prices} pricesLoading={pricesLoading} preferences={dietaryPreferences} isFavorite={isFavoriteProduct(product, favoriteProducts)} toggleFavorite={toggleFavoriteProduct} /></div>}
+            {scanMode === "ingredients" && analysis && <AnalysisBox title="KI-Ergebnis" badge={statusLabels[analysis.status] || analysis.status}><p>{analysis.explanation}</p>{getAnalysisWarnings(analysis, dietaryPreferences).length > 0 && <p className="mt-2 font-semibold text-tomato">Warnung: {getAnalysisWarnings(analysis, dietaryPreferences).join(", ")}</p>}{analysis.problematicIngredients?.length > 0 && <p className="mt-2 font-semibold text-tomato">Kritisch: {analysis.problematicIngredients.join(", ")}</p>}{analysis.detectedIngredients?.length ? <p className="mt-2 text-xs font-semibold leading-5 text-ink/45">Gelesen: {analysis.detectedIngredients.join(", ")}</p> : null}</AnalysisBox>}
             {scanMode === "menu" && menuText && <AnalysisBox title="Speisekarte"><p className="whitespace-pre-wrap">{menuText}</p></AnalysisBox>}
             {hasCurrentScan && !analysisLoading && !menuLoading && <button onClick={resetCurrentScan} className="mt-4 rounded-full bg-white px-5 py-3 text-sm font-bold text-moss shadow-sm">{scanMode === "ingredients" ? "Neue Zutatenliste scannen" : "Neue Speisekarte scannen"}</button>}
             {scanMode === "ingredients" && ingredientMessage && <p className="mt-3 text-sm font-semibold text-tomato">{ingredientMessage}</p>}
@@ -698,14 +778,21 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
         </section>
         <section className="flex max-h-[calc(100vh-8rem)] min-w-0 max-w-full flex-col gap-4 overflow-hidden rounded-3xl bg-white p-5 shadow-soft">
           <div className="min-h-0 min-w-0 shrink overflow-y-auto pr-1">
-            {scanMode === "ingredients" && product ? <ProductResultCard product={product} prices={prices} pricesLoading={pricesLoading} compact /> : scanMode === "ingredients" && analysis ? (
+            {scanMode === "ingredients" && product ? (
+              <div className="grid min-h-40 place-items-center rounded-3xl bg-cream p-6 text-center">
+                <div>
+                  <p className="text-lg font-bold">Produkt-Ergebnis</p>
+                  <p className="mt-2 text-sm leading-6 text-ink/60">Das aktuelle Scan-Ergebnis steht links direkt unter dem Scanner.</p>
+                </div>
+              </div>
+            ) : scanMode === "ingredients" && analysis ? (
               <AnalysisBox title="Aktuelles Zutaten-Ergebnis" badge={analysis.status}><p>{analysis.explanation}</p></AnalysisBox>
             ) : scanMode === "menu" && menuText ? (
               <AnalysisBox title="Aktuelle Speisekarte"><p className="whitespace-pre-wrap">{menuText}</p></AnalysisBox>
             ) : (
               <div className="grid min-h-48 place-items-center rounded-3xl bg-cream p-6 text-center">
                 <div>
-                  <p className="text-lg font-bold">{scanMode === "ingredients" ? "Noch kein Produkt geprueft" : "Speisekarten-Check"}</p>
+                  <p className="text-lg font-bold">{scanMode === "ingredients" ? "Noch kein Produkt geprüft" : "Speisekarten-Check"}</p>
                   <p className="mt-2 text-sm leading-6 text-ink/60">{scanMode === "ingredients" ? "Scanne Barcode oder Zutatenfoto." : "Lade eine Speisekarte hoch. Ergebnis: 3 klare Listen."}</p>
                 </div>
               </div>
@@ -720,7 +807,9 @@ function ScannerScreen({ user }: { user: AuthUser | null }) {
   );
 }
 
-function ProductResultCard({ product, prices, pricesLoading, compact = false }: { product: ProductResult; prices: PriceOption[]; pricesLoading: boolean; compact?: boolean }) {
+function ProductResultCard({ product, prices, pricesLoading, preferences, isFavorite, toggleFavorite, compact = false }: { product: ProductResult; prices: PriceOption[]; pricesLoading: boolean; preferences: DietaryPreferences; isFavorite: boolean; toggleFavorite: (product: ProductResult) => void; compact?: boolean }) {
+  const warnings = getProductWarnings(product, preferences);
+  const alternatives = getProductAlternatives(product, preferences);
   return (
     <div>
       <div className="flex items-center justify-between gap-3">
@@ -729,6 +818,22 @@ function ProductResultCard({ product, prices, pricesLoading, compact = false }: 
       </div>
       <p className="mt-2 text-sm font-semibold text-moss">Quelle: {product.source}</p>
       <p className={`${compact ? "max-h-20 overflow-hidden text-sm leading-6" : "leading-7"} mt-3 text-ink/70`}>{product.reason}</p>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button type="button" onClick={() => toggleFavorite(product)} className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ${isFavorite ? "bg-moss text-white" : "bg-cream text-moss"}`}>
+          <Heart size={16} fill={isFavorite ? "currentColor" : "none"} /> {isFavorite ? "Gemerkte Wahl" : "Produkt merken"}
+        </button>
+        <span className="inline-flex items-center gap-2 rounded-full bg-sage px-4 py-2 text-sm font-bold text-moss">
+          <ShieldCheck size={16} /> Profil: {dietLabel(preferences.diet)}
+        </span>
+      </div>
+      {warnings.length > 0 && (
+        <div className="mt-4 rounded-3xl bg-tomato/10 p-4">
+          <p className="flex items-center gap-2 text-sm font-black text-tomato"><AlertTriangle size={18} /> Warnungen für dein Profil</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {warnings.map((warning) => <span key={warning} className="rounded-full bg-white px-3 py-2 text-xs font-bold text-tomato">{warning}</span>)}
+          </div>
+        </div>
+      )}
       {product.imageUrl && <img src={product.imageUrl} alt={product.name} className="mt-4 h-32 rounded-2xl bg-cream object-contain p-3" />}
       <div className="mt-4 flex flex-wrap gap-2">
         {product.ingredients.map((item) => (
@@ -740,10 +845,10 @@ function ProductResultCard({ product, prices, pricesLoading, compact = false }: 
         <div className="rounded-2xl bg-cream p-4"><span className="block text-ink/50">Laden</span><b>{product.store}</b></div>
       </div>
       <div className="mt-4 rounded-3xl bg-cream p-4">
-        <p className="font-bold">Wo gibt es das guenstiger?</p>
-        <p className="mt-1 text-xs leading-5 text-ink/55">Echte Crowdsourcing-Preise aus Open Food Facts Open Prices. In Deutschland kann die Abdeckung noch lueckenhaft sein.</p>
+        <p className="font-bold">Wo gibt es das günstiger?</p>
+        <p className="mt-1 text-xs leading-5 text-ink/55">Echte Crowdsourcing-Preise aus Open Food Facts Open Prices. In Deutschland kann die Abdeckung noch lückenhaft sein.</p>
         {pricesLoading && <p className="mt-3 text-sm font-bold text-moss">Preise werden geladen...</p>}
-        {!pricesLoading && prices.length === 0 && <p className="mt-3 text-sm text-ink/60">Keine verifizierten Preisspots fuer diesen Barcode gefunden.</p>}
+        {!pricesLoading && prices.length === 0 && <p className="mt-3 text-sm text-ink/60">Keine verifizierten Preisspots für diesen Barcode gefunden.</p>}
         <div className="mt-3 space-y-2">
           {prices.map((price) => (
             <div key={`${price.store}-${price.price}-${price.date}`} className="rounded-2xl bg-white p-3 text-sm">
@@ -751,15 +856,23 @@ function ProductResultCard({ product, prices, pricesLoading, compact = false }: 
                 <b>{price.store}</b>
                 <b>{price.price.toFixed(2).replace(".", ",")} {price.currency}</b>
               </div>
-              <p className="mt-1 text-xs text-ink/55">{price.city || price.country} - bestaetigt {price.date}</p>
+              <p className="mt-1 text-xs text-ink/55">{price.city || price.country} - bestätigt {price.date}</p>
             </div>
           ))}
         </div>
       </div>
       <div className="mt-4 rounded-3xl bg-sage p-5">
-        <p className="text-sm font-semibold uppercase tracking-wide text-moss">Naechster Schritt</p>
-        <h3 className="mt-2 text-xl font-bold">{product.alternative.name}</h3>
-        <p className="mt-2 text-sm leading-6 text-ink/70">{product.alternative.reason}</p>
+        <p className="text-sm font-semibold uppercase tracking-wide text-moss">Veggie Alternativen</p>
+        <h3 className="mt-2 text-xl font-bold">{alternatives[0]?.name || product.alternative.name}</h3>
+        <p className="mt-2 text-sm leading-6 text-ink/70">{alternatives[0]?.reason || product.alternative.reason}</p>
+        <div className="mt-3 grid gap-2">
+          {alternatives.slice(0, 3).map((alternative) => (
+            <div key={alternative.name} className="rounded-2xl bg-white/70 p-3 text-sm">
+              <b>{alternative.name}</b>
+              <p className="mt-1 text-ink/60">{alternative.reason}</p>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -781,7 +894,7 @@ function ScanHistoryList({ items, restoreScan, deleteItem, clearItems, openImage
         {items.map((item) => (
           <div key={item.id} className="flex min-w-0 max-w-full items-center gap-2 rounded-2xl bg-white p-2 text-sm">
             {getScanPreviewImage(item) ? (
-              <button onClick={() => openImage({ src: getScanPreviewImage(item) || "", title: item.title })} className="shrink-0 overflow-hidden rounded-xl bg-cream" aria-label="Scan-Bild gross anzeigen">
+              <button onClick={() => openImage({ src: getScanPreviewImage(item) || "", title: item.title })} className="shrink-0 overflow-hidden rounded-xl bg-cream" aria-label="Scan-Bild groß anzeigen">
                 <img src={getScanPreviewImage(item) || ""} alt="" className="size-12 object-cover" />
               </button>
             ) : (
@@ -793,7 +906,7 @@ function ScanHistoryList({ items, restoreScan, deleteItem, clearItems, openImage
                 <span className="mt-1 block max-w-full truncate text-xs text-ink/55">{item.subtitle}</span>
               </span>
             </button>
-            <button onClick={() => deleteItem(item.id)} className="grid size-9 shrink-0 place-items-center rounded-full bg-cream text-ink/55 hover:bg-tomato hover:text-white" aria-label="Scan loeschen">
+            <button onClick={() => deleteItem(item.id)} className="grid size-9 shrink-0 place-items-center rounded-full bg-cream text-ink/55 hover:bg-tomato hover:text-white" aria-label="Scan löschen">
               <X size={16} />
             </button>
           </div>
@@ -809,10 +922,69 @@ function getScanPreviewImage(item: ScanHistoryItem) {
   return "";
 }
 
+function getProductWarnings(product: ProductResult, preferences: DietaryPreferences) {
+  if (product.status === "vegan") return [];
+  const haystack = [product.name, product.reason, ...product.ingredients.map((item) => item.name)].join(" ").toLowerCase();
+  const warnings = preferences.warnings.filter((warning) => getWarningTerms(warning).some((term) => containsIngredientSignal(haystack, term)));
+  if (preferences.diet === "vegan") warnings.unshift("nicht vegan");
+  if (preferences.diet === "vegetarisch" && product.status === "nicht veggie") warnings.unshift("nicht vegetarisch");
+  return Array.from(new Set(warnings));
+}
+
+function getAnalysisWarnings(analysis: IngredientAnalysis, preferences: DietaryPreferences) {
+  if (analysis.status === "vegan") return [];
+  const haystack = [analysis.explanation, ...(analysis.problematicIngredients || []), ...(analysis.detectedIngredients || [])].join(" ").toLowerCase();
+  const warnings = preferences.warnings.filter((warning) => getWarningTerms(warning).some((term) => containsIngredientSignal(haystack, term)));
+  if (preferences.diet === "vegan") warnings.unshift("nicht vegan");
+  if (preferences.diet === "vegetarisch" && analysis.status === "nicht veggie") warnings.unshift("nicht vegetarisch");
+  return Array.from(new Set(warnings));
+}
+
+function containsIngredientSignal(text: string, signal: string) {
+  const normalizedText = normalizeSearch(text);
+  const normalizedSignal = normalizeSearch(signal);
+  if (normalizedSignal.length <= 2) {
+    return new RegExp(`(^|[^a-z0-9äöüß])${escapeRegExp(normalizedSignal)}([^a-z0-9äöüß]|$)`, "i").test(normalizedText);
+  }
+  return normalizedText.includes(normalizedSignal);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getProductAlternatives(product: ProductResult, preferences: DietaryPreferences) {
+  const isVeganProfile = preferences.diet === "vegan";
+  const alternatives = [
+    {
+      name: isVeganProfile ? "Vegane Variante dieses Produkts suchen" : "Vegetarische Variante dieses Produkts suchen",
+      reason: `Passt besser zu deinem Profil: ${dietLabel(preferences.diet)}.`
+    },
+    {
+      name: "Community-Spots auf der Karte prüfen",
+      reason: "Andere Nutzer können lokale Alternativen, Supermärkte oder Restaurants ergänzt haben."
+    },
+    {
+      name: "Zutatenfoto scannen",
+      reason: "Wenn der Barcode unklar ist, liefert ein Zutatenfoto oft eine genauere Einschätzung."
+    }
+  ];
+  if (product.status === "vegan") {
+    alternatives.unshift({ name: "Als sicheres Produkt speichern", reason: "Dieses Produkt wirkt passend. Speichere es für deinen nächsten Einkauf." });
+  }
+  return alternatives;
+}
+
+function dietLabel(diet: DietMode) {
+  if (diet === "vegan") return "Vegan";
+  if (diet === "vegetarisch") return "Vegetarisch";
+  return "Flexitarisch";
+}
+
 function ScanImageModal({ image, close }: { image: { src: string; title: string }; close: () => void }) {
   return (
     <div className="fixed inset-0 z-[1100] grid place-items-center bg-ink/85 p-4" role="dialog" aria-modal="true">
-      <button onClick={close} className="absolute right-4 top-4 grid size-11 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Bild schliessen"><X size={20} /></button>
+      <button onClick={close} className="absolute right-4 top-4 grid size-11 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Bild schließen"><X size={20} /></button>
       <figure className="w-full max-w-3xl">
         <img src={image.src} alt={image.title} className="max-h-[82vh] w-full rounded-3xl bg-white object-contain p-2 shadow-soft" />
         <figcaption className="mt-3 text-center text-sm font-bold text-white">{image.title}</figcaption>
@@ -827,7 +999,7 @@ function MenuPhotoStrip({ photos, removePhoto, analyze, loading }: { photos: str
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="font-bold">Speisekarten-Seiten</p>
-          <p className="mt-1 text-xs font-semibold text-ink/50">{photos.length} von 8 Seiten hinzugefuegt</p>
+          <p className="mt-1 text-xs font-semibold text-ink/50">{photos.length} von 8 Seiten hinzugefügt</p>
         </div>
         <button onClick={analyze} disabled={loading || photos.length === 0} className="inline-flex items-center rounded-2xl bg-ink px-4 py-3 text-sm font-bold text-white disabled:opacity-60">
           {loading ? <Loader2 className="mr-2 animate-spin" size={16} /> : <Search className="mr-2" size={16} />} Analysieren
@@ -872,18 +1044,34 @@ function AnalysisBox({ title, badge, children }: { title: string; badge?: string
   );
 }
 
-function MapScreen({ finds, setScreen, confirmFind, user }: { finds: Find[]; setScreen: (screen: Screen) => void; confirmFind: (id: number) => void; user: AuthUser | null }) {
-  const [active, setActive] = useState(categories[0]);
+function MapScreen({ finds, setScreen, confirmFind, user, reactToFind, routeSpotId, openSpotRoute, closeSpotRoute }: { finds: Find[]; setScreen: (screen: Screen) => void; confirmFind: (id: number) => void; user: AuthUser | null; reactToFind: (id: number, reaction: SpotReaction) => void; routeSpotId?: number; openSpotRoute: (id: number) => void; closeSpotRoute: () => void }) {
+  const [activeFilter, setActiveFilter] = useState<MapFilterId>("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detailFind, setDetailFind] = useState<Find | null>(null);
+  const [publicProfile, setPublicProfile] = useState<{ id?: string; name: string } | null>(null);
   const [userLocation, setUserLocation] = useState<UserLocation | null>(null);
   const [locationMessage, setLocationMessage] = useState("");
-  const visible = active === categories[0] ? finds : finds.filter((find) => find.category === active);
+  const normalizedSearch = normalizeSearch(searchQuery);
+  const visible = finds.filter((find) => matchesMapFilter(find, activeFilter) && matchesSpotSearch(find, normalizedSearch));
   const displayFinds = userLocation
     ? [...visible].sort((a, b) => getDistanceKm(userLocation, a) - getDistanceKm(userLocation, b)).map((find) => ({ ...find, distance: formatDistance(getDistanceKm(userLocation, find)) }))
     : visible;
   const mappable = displayFinds.filter((find) => Number.isFinite(find.lat) && Number.isFinite(find.lng));
-  const selected = displayFinds.find((find) => find.id === selectedId) ?? mappable[0] ?? displayFinds[0] ?? null;
+  const selected = displayFinds.find((find) => find.id === selectedId) ?? null;
+  const selectedFilterLabel = mapFilters.find((filter) => filter.id === activeFilter)?.label || "Alle";
+
+  useEffect(() => {
+    if (!routeSpotId) {
+      setDetailFind(null);
+      return;
+    }
+    const routedFind = finds.find((find) => find.id === routeSpotId);
+    if (routedFind) {
+      setSelectedId(routeSpotId);
+      setDetailFind(routedFind);
+    }
+  }, [routeSpotId, finds]);
 
   function findNearby() {
     if (!navigator.geolocation) {
@@ -894,31 +1082,38 @@ function MapScreen({ finds, setScreen, confirmFind, user }: { finds: Find[]; set
     navigator.geolocation.getCurrentPosition(
       (position) => {
         setUserLocation({ lat: position.coords.latitude, lng: position.coords.longitude });
-        setActive(categories[0]);
+        setActiveFilter("all");
         setLocationMessage("Spots nach Entfernung sortiert.");
       },
-      () => setLocationMessage("Standortfreigabe wurde nicht erlaubt oder ist nicht verfuegbar."),
+      () => setLocationMessage("Standortfreigabe wurde nicht erlaubt oder ist nicht verfügbar."),
       { enableHighAccuracy: true, timeout: 10000 }
     );
   }
 
   return (
     <>
-      <Header eyebrow="In der Naehe" title="Community-Spots" action={<button onClick={() => setScreen("add")} className="rounded-2xl bg-moss p-3 text-white shadow-soft" aria-label="Spot hinzufuegen"><Plus /></button>} />
-      <button onClick={() => setScreen("add")} className="mb-4 flex w-full items-center gap-4 rounded-3xl bg-moss p-5 text-left text-white shadow-soft">
-        <span className="grid size-12 place-items-center rounded-2xl bg-white text-moss"><Plus /></span>
-        <span><span className="block text-xl font-bold">Spot hinzufuegen</span><span className="text-sm text-white/80">Gerade etwas Gutes entdeckt? Teile es ohne Anmeldung.</span></span>
+      <Header eyebrow="In der Nähe" title="Community-Spots" action={<button onClick={() => setScreen("add")} className="rounded-2xl bg-moss p-3 text-white shadow-soft" aria-label="Spot hinzufügen"><Plus /></button>} />
+      <button onClick={() => setScreen("add")} className="mb-3 flex w-full items-center gap-3 rounded-2xl bg-moss p-4 text-left text-white shadow-soft sm:mb-4 sm:gap-4 sm:rounded-3xl sm:p-5">
+        <span className="grid size-10 shrink-0 place-items-center rounded-2xl bg-white text-moss sm:size-12"><Plus size={20} /></span>
+        <span><span className="block text-lg font-bold sm:text-xl">Spot hinzufügen</span><span className="text-sm text-white/80">Gerade etwas Gutes entdeckt? Teile es ohne Anmeldung.</span></span>
       </button>
-      <div className="mb-4 flex flex-wrap items-center gap-3 rounded-3xl bg-white p-3 shadow-soft">
-        <button onClick={findNearby} className="rounded-2xl bg-moss px-4 py-3 text-sm font-bold text-white">Spots in meiner Naehe</button>
-        {userLocation && <button onClick={() => { setUserLocation(null); setLocationMessage(""); }} className="rounded-2xl bg-cream px-4 py-3 text-sm font-bold text-moss">Sortierung zuruecksetzen</button>}
-        {locationMessage && <span className="text-sm font-semibold text-ink/60">{locationMessage}</span>}
+      <div className="mb-4 grid gap-3 rounded-3xl bg-white p-3 shadow-soft lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+        <label className="flex min-w-0 items-center gap-3 rounded-2xl bg-cream px-4 py-3">
+          <Search size={18} className="shrink-0 text-moss" />
+          <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} className="min-w-0 flex-1 bg-transparent text-sm font-semibold outline-none placeholder:text-ink/40" placeholder="Spot, Ort oder Gericht suchen" />
+          {searchQuery && <button type="button" onClick={() => setSearchQuery("")} className="grid size-7 shrink-0 place-items-center rounded-full bg-white text-ink/45 hover:text-tomato" aria-label="Suche löschen"><X size={14} /></button>}
+        </label>
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={findNearby} className="rounded-2xl bg-moss px-4 py-3 text-sm font-bold text-white">In meiner Nähe</button>
+          {userLocation && <button onClick={() => { setUserLocation(null); setLocationMessage(""); }} className="rounded-2xl bg-cream px-4 py-3 text-sm font-bold text-moss">Sortierung zurücksetzen</button>}
+        </div>
+        {(locationMessage || finds.length > 0) && <div className="rounded-2xl bg-cream px-4 py-3 text-sm font-semibold text-ink/60 lg:col-span-2"><b className="text-moss">{displayFinds.length}</b> von {finds.length} Spots sichtbar · Filter: {selectedFilterLabel}{locationMessage ? ` · ${locationMessage}` : ""}</div>}
       </div>
       <div className="mb-4 flex gap-2 overflow-x-auto pb-2">
-        {categories.map((category) => <button key={category} onClick={() => setActive(category)} className={`shrink-0 rounded-full px-4 py-2 text-sm font-bold ${active === category ? "bg-moss text-white" : "bg-white"}`}>{category}</button>)}
+        {mapFilters.map((filter) => <button key={filter.id} onClick={() => { setActiveFilter(filter.id); setSelectedId(null); }} className={`shrink-0 rounded-full px-4 py-2 text-sm font-bold ${activeFilter === filter.id ? "bg-moss text-white" : "bg-white"}`}>{filter.label}</button>)}
       </div>
       <section className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="relative h-[24rem] overflow-hidden rounded-3xl bg-sage shadow-soft lg:h-[min(70vh,42rem)]">
+        <div className="relative h-[18rem] overflow-hidden rounded-3xl bg-sage shadow-soft sm:h-[24rem] lg:h-[min(70vh,42rem)]">
           {mappable.length > 0 ? (
             <>
               <SpotMap
@@ -927,28 +1122,137 @@ function MapScreen({ finds, setScreen, confirmFind, user }: { finds: Find[]; set
                 userLocation={userLocation}
                 selectSpot={setSelectedId}
               />
-              <div className="absolute bottom-4 right-4 max-w-56 rounded-2xl bg-white/95 p-3 text-sm shadow-soft backdrop-blur"><b>{selected?.name}</b><p className="mt-1 text-xs text-ink/60">{selected?.place}</p><p className="mt-1 text-xs font-bold text-moss">{selected?.price}</p></div>
-              {selected && <a href={`https://www.openstreetmap.org/?mlat=${selected.lat}&mlon=${selected.lng}#map=16/${selected.lat}/${selected.lng}`} target="_blank" rel="noreferrer" className="absolute bottom-4 left-4 rounded-2xl bg-white/95 px-4 py-3 text-sm font-bold text-moss backdrop-blur">In OpenStreetMap oeffnen</a>}
+              {selected && <div className="absolute bottom-4 right-4 max-w-56 rounded-2xl bg-white/95 p-3 text-sm shadow-soft backdrop-blur"><b>{selected.name}</b><p className="mt-1 text-xs text-ink/60">{getShortPlace(selected.place)}</p><p className="mt-1 text-xs font-bold text-moss">{selected.price}</p></div>}
+              {selected && <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${selected.lat},${selected.lng}`)}`} target="_blank" rel="noreferrer" className="absolute bottom-4 left-4 rounded-2xl bg-white/95 px-4 py-3 text-sm font-bold text-moss backdrop-blur">Google Maps</a>}
             </>
           ) : (
             <div className="grid h-full place-items-center p-6 text-center">
               <div>
                 <MapPinned className="mx-auto text-moss" size={44} />
                 <p className="mt-3 text-lg font-bold">Noch keine Spots auf der Karte</p>
-                <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-ink/60">Sobald du ein Produkt oder Gericht mit echter Location hinzufuegst, erscheint es hier.</p>
-                <button onClick={() => setScreen("add")} className="mt-5 rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft">Ersten Spot hinzufuegen</button>
+                <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-ink/60">Sobald du ein Produkt oder Gericht mit echter Location hinzufügst, erscheint es hier.</p>
+                <button onClick={() => setScreen("add")} className="mt-5 rounded-2xl bg-moss px-5 py-3 font-bold text-white shadow-soft">Ersten Spot hinzufügen</button>
               </div>
             </div>
           )}
         </div>
-        <div className="max-h-[32rem] space-y-3 overflow-y-auto pr-1 lg:max-h-[min(70vh,42rem)]">
-          {displayFinds.map((find) => <FindCard key={find.id} find={find} confirmFind={confirmFind} selected={find.id === selectedId} focusFind={() => setSelectedId(find.id)} openFind={() => setDetailFind(find)} />)}
-          {displayFinds.length === 0 && <p className="rounded-2xl bg-white p-5 text-ink/60">In dieser Kategorie gibt es noch keinen Spot. Fueg den ersten hinzu.</p>}
+        <div className="space-y-3 p-1 lg:max-h-[min(70vh,42rem)] lg:overflow-y-auto lg:overflow-x-hidden lg:pr-4 lg:[scrollbar-gutter:stable]">
+          {displayFinds.map((find) => <FindCard key={find.id} find={find} confirmFind={confirmFind} selected={find.id === selectedId} reactToFind={reactToFind} focusFind={() => setSelectedId(find.id)} openFind={() => openSpotRoute(find.id)} openProfile={(profile) => setPublicProfile(profile)} />)}
+          {displayFinds.length === 0 && <p className="rounded-2xl bg-white p-5 text-ink/60">Keine passenden Spots gefunden. Ändere den Filter oder füge den ersten passenden Ort hinzu.</p>}
         </div>
       </section>
-      {detailFind && <FindDetailModal find={detailFind} finds={finds} confirmFind={confirmFind} close={() => setDetailFind(null)} setScreen={setScreen} user={user} />}
+      {detailFind && <FindDetailModal find={finds.find((item) => item.id === detailFind.id) || detailFind} finds={finds} confirmFind={confirmFind} reactToFind={reactToFind} close={closeSpotRoute} setScreen={setScreen} user={user} />}
+      {publicProfile && <PublicProfileModal profile={publicProfile} finds={finds} close={() => setPublicProfile(null)} />}
     </>
   );
+}
+
+function matchesMapFilter(find: Find, filter: MapFilterId) {
+  if (filter === "all") return true;
+  if (filter === "vegan") return find.status === "vegan";
+  if (filter === "vegetarian") return find.status === "vegetarisch" || find.status === "vegan" || find.status === "vegan möglich";
+  if (filter === "cheap") return getPriceNumber(find.price) <= 5;
+  if (filter === "confirmed") return Number(find.confirmations || 0) > 0;
+  if (filter === "photo") return Boolean(find.imageDataUrl);
+  return true;
+}
+
+function matchesSpotSearch(find: Find, query: string) {
+  if (!query) return true;
+  return [find.name, find.place, find.description, find.category, find.price]
+    .map(normalizeSearch)
+    .some((value) => value.includes(query));
+}
+
+function normalizeSearch(value: string) {
+  return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function getPriceNumber(price: string) {
+  const match = price.replace(",", ".").match(/\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : Number.POSITIVE_INFINITY;
+}
+
+function getTrustScore(find: Find) {
+  const confirmations = Math.min(35, (find.confirmations || 0) * 7);
+  const likes = find.likeCount || 0;
+  const dislikes = find.dislikeCount || 0;
+  const reactionTotal = likes + dislikes;
+  const reactionScore = reactionTotal > 0 ? Math.round((likes / reactionTotal) * 25) : 8;
+  const photoScore = find.imageDataUrl ? 12 : 0;
+  const detailScore = find.description?.length > 12 ? 10 : 0;
+  const ownerScore = find.createdByName ? 8 : 0;
+  const freshnessScore = /gerade|Min|Std|Tag/.test(find.confirmed || "") ? 10 : 5;
+  return Math.max(1, Math.min(100, confirmations + reactionScore + photoScore + detailScore + ownerScore + freshnessScore));
+}
+
+function TrustScoreBadge({ find, onClick }: { find: Find; onClick?: (event: MouseEvent<HTMLButtonElement>) => void }) {
+  const score = getTrustScore(find);
+  const tone = score >= 75 ? "bg-leaf text-white" : score >= 45 ? "bg-honey text-ink" : "bg-cream text-ink/60";
+  return <button type="button" onClick={onClick} className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-black ${tone}`} aria-label={`Vertrauensscore ${score} von 100 erklären`}><ShieldCheck size={14} /> {score}</button>;
+}
+
+function getTrustScoreLabel(score: number) {
+  if (score >= 75) return "sehr vertrauenswürdig";
+  if (score >= 45) return "solide, aber noch ausbaufähig";
+  return "noch wenig bestätigt";
+}
+
+function getWarningTerms(signal: string) {
+  const normalized = normalizeSearch(signal);
+  const terms: Record<string, string[]> = {
+    gluten: ["gluten", "weizen", "weizenmehl", "roggen", "gerste", "dinkel", "hafer", "grünkern", "graupen", "bulgur", "couscous", "seitan"],
+    nusse: ["nuss", "nüsse", "haselnuss", "mandel", "cashew", "walnuss", "erdnuss", "pistazie", "pecan", "macadamia"],
+    soja: ["soja", "sojabohne", "sojalecithin", "tofu", "tempeh"],
+    milch: ["milch", "laktose", "molke", "casein", "kasein", "butter", "sahne", "käse", "kaese"],
+    ei: ["ei", "eier", "eiklar", "eigelb", "vollei", "albumin"],
+    gelatine: ["gelatine", "kollagen"],
+    honig: ["honig", "bienenhonig"],
+    palmol: ["palmöl", "palmoel", "palmfett", "palmenfett"]
+  };
+  return terms[normalized] || terms[normalized.replace("ö", "o")] || [signal];
+}
+
+function getShortPlace(place: string) {
+  const parts = place.split(",").map((part) => part.trim()).filter(Boolean);
+  if (parts.length <= 2) return place;
+
+  const postcodeIndex = parts.findIndex((part) => /\b\d{5}\b/.test(part));
+  const postcode = postcodeIndex >= 0 ? parts[postcodeIndex].match(/\b\d{5}\b/)?.[0] || "" : "";
+  const houseNumberIndex = parts.findIndex((part) => /^\d+[a-zA-Z]?(?:[-/]\d+[a-zA-Z]?)?$/.test(part));
+  const streetIndex = houseNumberIndex >= 0 && parts[houseNumberIndex + 1]
+    ? houseNumberIndex + 1
+    : parts.findIndex((part) => /(straße|strasse|platz|weg|allee|gasse|ring|damm|ufer|markt|chaussee|boulevard|street|road|avenue)/i.test(part));
+  const street = normalizeStreetPart(streetIndex >= 0 ? parts[streetIndex] : parts[0]);
+  const houseNumber = houseNumberIndex >= 0 ? parts[houseNumberIndex] : "";
+  const streetLine = houseNumber && !street.includes(houseNumber) ? `${street} ${houseNumber}` : street;
+
+  let city = "";
+  if (postcodeIndex >= 0) {
+    const afterPostcode = parts.slice(postcodeIndex + 1).find((part) => !isCountryName(part));
+    const beforePostcode = parts.slice(0, postcodeIndex).reverse().find((part) => {
+      if (part === street || part === houseNumber) return false;
+      if (/\d/.test(part)) return false;
+      return !isStateName(part);
+    });
+    city = afterPostcode || beforePostcode || "";
+  }
+
+  const cityLine = [postcode, city].filter(Boolean).join(" ");
+  return [streetLine, cityLine].filter(Boolean).join(", ") || place;
+}
+
+function isCountryName(value: string) {
+  return /^(deutschland|germany|allemagne)$/i.test(value.trim());
+}
+
+function isStateName(value: string) {
+  return /^(baden-württemberg|bayern|berlin|brandenburg|bremen|hamburg|hessen|mecklenburg-vorpommern|niedersachsen|nordrhein-westfalen|rheinland-pfalz|saarland|sachsen|sachsen-anhalt|schleswig-holstein|thüringen)$/i.test(value.trim());
+}
+
+function normalizeStreetPart(value: string) {
+  const segments = value.split(/\s+-\s+/).map((part) => part.trim()).filter(Boolean);
+  return segments.reverse().find((part) => /(straße|strasse|platz|weg|allee|gasse|ring|damm|ufer|markt|chaussee|boulevard|street|road|avenue)/i.test(part)) || value;
 }
 
 function SpotMap({ spots, selectedId, userLocation, selectSpot }: { spots: Find[]; selectedId: number | null; userLocation: UserLocation | null; selectSpot: (id: number) => void }) {
@@ -992,7 +1296,7 @@ function SpotMap({ spots, selectedId, userLocation, selectSpot }: { spots: Find[
       const marker = L.marker([spot.lat, spot.lng], {
         icon: createSpotMarkerIcon(spot.id === selectedId)
       }).addTo(layer);
-      marker.bindPopup(`<strong>${escapeHtml(spot.name)}</strong><br>${escapeHtml(spot.place)}<br><span>${escapeHtml(spot.price)}</span>`);
+      marker.bindPopup(`<strong>${escapeHtml(spot.name)}</strong><br>${escapeHtml(getShortPlace(spot.place))}<br><span>${escapeHtml(spot.price)}</span>`);
       marker.on("click", () => {
         selectSpot(spot.id);
       });
@@ -1047,32 +1351,58 @@ function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char] || char));
 }
 
-function FindCard({ find, confirmFind, selected, focusFind, openFind }: { find: Find; confirmFind: (id: number) => void; selected: boolean; focusFind: () => void; openFind: () => void }) {
+function FindCard({ find, confirmFind, selected, reactToFind, focusFind, openFind, openProfile }: { find: Find; confirmFind: (id: number) => void; selected: boolean; reactToFind: (id: number, reaction: SpotReaction) => void; focusFind: () => void; openFind: () => void; openProfile: (profile: { id?: string; name: string }) => void }) {
   const confirmations = find.confirmations ?? 0;
   const isConfirmed = find.viewerConfirmed ?? false;
   const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${find.lat},${find.lng}`)}`;
+  const shortPlace = getShortPlace(find.place);
+  const reaction = find.viewerReaction || "";
+  const likeCount = find.likeCount ?? 0;
+  const dislikeCount = find.dislikeCount ?? 0;
+  const [scoreOpen, setScoreOpen] = useState(false);
+  const trustScore = getTrustScore(find);
   return (
-    <article className={`relative rounded-3xl bg-white p-4 shadow-soft ring-2 transition ${selected ? "ring-moss" : "ring-transparent"}`}>
-      <button onClick={openFind} className="absolute right-3 top-3 z-10 grid size-10 place-items-center rounded-full bg-cream text-moss shadow-sm transition hover:bg-moss hover:text-white" aria-label={`${find.name} Details oeffnen`}>
+    <article className={`relative rounded-3xl border-2 bg-white p-4 shadow-soft transition ${selected ? "border-moss" : "border-transparent"}`}>
+      <button onClick={openFind} className="absolute right-3 top-3 z-10 grid size-10 place-items-center rounded-full bg-cream text-moss shadow-sm transition hover:bg-moss hover:text-white" aria-label={`${find.name} Details öffnen`}>
         <MenuSquare size={18} />
       </button>
-      <button onClick={focusFind} className="flex w-full gap-4 pr-10 text-left">
+      <div onClick={focusFind} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") focusFind(); }} role="button" tabIndex={0} className="flex w-full cursor-pointer gap-3 pr-10 text-left outline-none sm:gap-4">
         <div className="grid size-20 shrink-0 place-items-center overflow-hidden rounded-2xl bg-oat text-moss">
           {find.imageDataUrl ? <img src={find.imageDataUrl} alt="" className="h-full w-full object-cover" /> : <FindIcon category={find.category} size={28} />}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-2">
-            <h2 className="font-bold">{find.name}</h2>
-            <span className="mr-7"><Badge status={find.status} /></span>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h2 className="min-w-0 max-w-full truncate font-bold">{find.name}</h2>
+            <Badge status={find.status} />
+            <TrustScoreBadge find={find} onClick={(event) => { event.stopPropagation(); setScoreOpen((open) => !open); }} />
           </div>
-          <p className="mt-1 text-sm text-ink/60">{find.place}{find.distance ? ` - ${find.distance}` : ""}</p>
+          {scoreOpen && (
+            <div className="absolute right-12 top-14 z-20 max-w-56 rounded-2xl bg-ink px-4 py-3 text-xs font-semibold leading-5 text-white shadow-soft">
+              <span className="absolute -top-1 right-8 size-3 rotate-45 bg-ink" />
+              <b>Score {trustScore}/100</b>
+              <span className="mt-1 block text-white/75">{getTrustScoreLabel(trustScore)}. Basiert auf Bestätigungen, Likes, Foto, Beschreibung und Aktualität.</span>
+            </div>
+          )}
+          <p className="mt-1 line-clamp-2 text-sm text-ink/60">{shortPlace}{find.distance ? ` - ${find.distance}` : ""}</p>
           <p className="mt-2 text-sm leading-6">{find.description}</p>
-          <p className="mt-2 text-sm font-semibold text-moss">{find.price} - zuletzt bestaetigt {find.confirmed}</p>
+          <p className="mt-2 text-sm font-semibold text-moss">{find.price} - zuletzt bestätigt {find.confirmed}</p>
         </div>
-      </button>
+      </div>
+      {find.createdByName && (
+        <button type="button" onClick={() => openProfile({ id: find.createdBy, name: find.createdByName || "Veggie Nutzer" })} className="mt-3 inline-flex max-w-full items-center gap-2 rounded-full bg-cream px-3 py-2 text-xs font-bold text-moss transition hover:bg-sage">
+          <UserRound size={14} />
+          <span className="truncate">Von {find.createdByName}</span>
+        </button>
+      )}
       <div className="mt-3 flex flex-wrap gap-2">
+        <button type="button" onClick={() => reactToFind(find.id, "like")} aria-pressed={reaction === "like"} className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ${reaction === "like" ? "bg-moss text-white" : "bg-cream text-moss"}`} aria-label="Spot liken">
+          <ThumbsUp size={16} /> {likeCount}
+        </button>
+        <button type="button" onClick={() => reactToFind(find.id, "dislike")} aria-pressed={reaction === "dislike"} className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ${reaction === "dislike" ? "bg-tomato text-white" : "bg-cream text-ink/60"}`} aria-label="Spot disliken">
+          <ThumbsDown size={16} /> {dislikeCount}
+        </button>
         <button onClick={() => confirmFind(find.id)} disabled={isConfirmed} className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ${isConfirmed ? "bg-cream text-ink/45" : "bg-sage text-moss"}`}>
-          <Check size={16} /> {isConfirmed ? "Spot bestaetigt" : "Spot bestaetigen"} {confirmations > 0 && `(${confirmations})`}
+          <Check size={16} /> {isConfirmed ? "Spot bestätigt" : "Spot bestätigen"} {confirmations > 0 && `(${confirmations})`}
         </button>
         <a href={mapsUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-full bg-ink px-4 py-2 text-sm font-bold text-white">
           <MapPinned size={16} /> Route
@@ -1082,7 +1412,7 @@ function FindCard({ find, confirmFind, selected, focusFind, openFind }: { find: 
   );
 }
 
-function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: { find: Find; finds: Find[]; confirmFind: (id: number) => void; close: () => void; setScreen: (screen: Screen) => void; user: AuthUser | null }) {
+function FindDetailModal({ find, finds, confirmFind, reactToFind, close, setScreen, user }: { find: Find; finds: Find[]; confirmFind: (id: number) => void; reactToFind: (id: number, reaction: SpotReaction) => void; close: () => void; setScreen: (screen: Screen) => void; user: AuthUser | null }) {
   const [locallyConfirmed, setLocallyConfirmed] = useState(Boolean(find.viewerConfirmed));
   const [localConfirmations, setLocalConfirmations] = useState(find.confirmations ?? 0);
   const confirmations = localConfirmations;
@@ -1092,8 +1422,26 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
   const [publicProfile, setPublicProfile] = useState<{ id?: string; name: string } | null>(null);
   const [comments, setComments] = useState<SpotComment[]>(() => readSpotComments(find.id));
   const [commentText, setCommentText] = useState("");
+  const [replyTarget, setReplyTarget] = useState<{ parentId: number; author: string } | null>(null);
+  const [replyText, setReplyText] = useState("");
   const [commentMessage, setCommentMessage] = useState("");
   const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${find.lat},${find.lng}`)}`;
+  const commentThreads = buildCommentThreads(comments);
+  const shortPlace = getShortPlace(find.place);
+  const reaction = find.viewerReaction || "";
+  const likeCount = find.likeCount ?? 0;
+  const dislikeCount = find.dislikeCount ?? 0;
+
+  useEffect(() => {
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousHtmlOverflow;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1115,9 +1463,10 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
     confirmFind(find.id);
   }
 
-  function submitComment() {
-    const text = commentText.trim();
-    if (!isLoggedIn || !text) return;
+  function submitComment(parentId: number | null = null) {
+    const rawText = (parentId ? replyText : commentText).trim();
+    const text = parentId && replyTarget ? `@${replyTarget.author} ${rawText}` : rawText;
+    if (!isLoggedIn || !rawText) return;
     const currentUser = user;
     if (!currentUser) return;
     setCommentMessage("");
@@ -1126,37 +1475,70 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
       userId: currentUser.id,
       authorName: getUserDisplayName(currentUser),
       body: text,
-      isPublic: true
+      isPublic: true,
+      parentCommentId: parentId
     };
     const comment = {
       id: Date.now(),
+      userId: currentUser.id,
       author: getUserDisplayName(currentUser),
       text,
+      parentId,
       createdAt: new Date().toISOString()
     };
-    const next = [comment, ...comments].slice(0, 50);
+    const next = parentId ? [...comments, comment].slice(-100) : [comment, ...comments].slice(0, 100);
     setComments(next);
     saveSpotComments(find.id, next);
     void saveComment(payload).then((saved) => {
-      setComments((current) => [saved, ...current.filter((item) => item.id !== comment.id)]);
-      setCommentMessage("Kommentar gespeichert.");
+      setComments((current) => {
+        const updated = current.map((item) => item.id === comment.id ? saved : item);
+        saveSpotComments(find.id, updated);
+        return updated;
+      });
+      setCommentMessage(parentId ? "Antwort gespeichert." : "Kommentar gespeichert.");
     }).catch((error) => {
       console.warn(error);
-      setCommentMessage("Kommentar ist lokal sichtbar, aber noch nicht in Supabase gespeichert.");
+      setCommentMessage(parentId ? "Antwort ist lokal sichtbar, aber noch nicht in Supabase gespeichert." : "Kommentar ist lokal sichtbar, aber noch nicht in Supabase gespeichert.");
     });
-    setCommentText("");
+    if (parentId) {
+      setReplyText("");
+      setReplyTarget(null);
+    } else {
+      setCommentText("");
+    }
+  }
+
+  function deleteOwnComment(comment: SpotComment) {
+    const currentUser = user;
+    if (!currentUser || comment.userId !== currentUser.id) return;
+    const next = removeCommentWithReplies(comments, comment.id);
+    setComments(next);
+    saveSpotComments(find.id, next);
+    void deleteRemoteComment(currentUser.id, comment.id).then(() => {
+      setCommentMessage("Kommentar gelöscht.");
+    }).catch((error) => {
+      console.warn(error);
+      setCommentMessage("Kommentar wurde lokal entfernt, aber noch nicht in Supabase gelöscht.");
+    });
   }
 
   return (
     <div className="fixed inset-0 z-[1000] grid place-items-end bg-ink/45 p-0 backdrop-blur-sm sm:place-items-center sm:p-6" role="dialog" aria-modal="true">
-      <article className="max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-cream shadow-soft sm:max-w-2xl sm:rounded-3xl">
-        <div className="relative h-72 overflow-hidden bg-oat sm:h-96">
+      <article className="flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-3xl bg-cream shadow-soft sm:max-w-2xl sm:rounded-3xl">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-oat/70 bg-cream/95 px-4 py-3 backdrop-blur">
+          <div className="min-w-0">
+            <p className="text-xs font-black uppercase tracking-wide text-moss">Spotdetails</p>
+            <h2 className="truncate text-xl font-black">{find.name}</h2>
+          </div>
+          <button onClick={close} className="grid size-11 shrink-0 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Details schließen"><X size={18} /></button>
+        </div>
+        <div className="overflow-y-auto overscroll-contain">
+        <div className="relative h-56 overflow-hidden bg-oat sm:h-72">
           {find.imageDataUrl ? (
-            <button onClick={() => setImageOpen(true)} className="h-full w-full bg-ink/5 p-3" aria-label="Bild gross anzeigen">
+            <button onClick={() => setImageOpen(true)} className="h-full w-full bg-ink/5 p-3" aria-label="Bild groß anzeigen">
               <img src={find.imageDataUrl} alt={find.name} className="h-full w-full rounded-2xl object-contain" />
             </button>
           ) : <div className="grid h-full place-items-center text-moss"><FindIcon category={find.category} size={72} /></div>}
-          <button onClick={close} className="absolute right-4 top-4 grid size-10 place-items-center rounded-full bg-white/95 text-ink shadow-soft" aria-label="Details schliessen"><X size={18} /></button>
           {find.imageDataUrl && <button onClick={() => setImageOpen(true)} className="absolute left-4 top-4 rounded-full bg-white/95 px-4 py-2 text-sm font-bold text-moss shadow-soft">Bild anzeigen</button>}
           <div className="absolute bottom-4 left-4 right-4 flex items-end justify-between gap-3">
             <div>
@@ -1167,10 +1549,14 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
           </div>
         </div>
         <div className="space-y-4 p-5">
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Ort</span><b>{find.place}</b></div>
-            <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Kategorie</span><b>{find.category}</b></div>
-            <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Bestaetigt</span><b>{confirmations}</b></div>
+          <div className="rounded-3xl bg-white p-4">
+            <span className="block text-xs font-bold uppercase text-ink/45">Ort</span>
+            <b className="mt-1 block text-lg">{shortPlace}</b>
+            <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold">
+              <span className="rounded-full bg-cream px-3 py-1 text-moss">{find.category}</span>
+              <span className="rounded-full bg-cream px-3 py-1 text-ink/60">{confirmations} bestätigt</span>
+              <TrustScoreBadge find={find} />
+            </div>
           </div>
           <div className="rounded-3xl bg-white p-5">
             <p className="text-sm font-bold uppercase text-moss">Beschreibung</p>
@@ -1180,11 +1566,17 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
                 Von {find.createdByName}
               </button>
             )}
-            <p className="mt-3 text-sm font-semibold text-ink/55">Zuletzt bestaetigt {find.confirmed}</p>
+            <p className="mt-3 text-sm font-semibold text-ink/55">Zuletzt bestätigt {find.confirmed}</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => reactToFind(find.id, "like")} aria-pressed={reaction === "like"} className={`inline-flex items-center gap-2 rounded-2xl px-5 py-3 font-bold ${reaction === "like" ? "bg-moss text-white" : "bg-white text-moss"}`} aria-label="Spot liken">
+              <ThumbsUp size={18} /> {likeCount}
+            </button>
+            <button type="button" onClick={() => reactToFind(find.id, "dislike")} aria-pressed={reaction === "dislike"} className={`inline-flex items-center gap-2 rounded-2xl px-5 py-3 font-bold ${reaction === "dislike" ? "bg-tomato text-white" : "bg-white text-ink/60"}`} aria-label="Spot disliken">
+              <ThumbsDown size={18} /> {dislikeCount}
+            </button>
             <button onClick={confirmFromDetail} disabled={isConfirmed} className={`inline-flex items-center gap-2 rounded-2xl px-5 py-3 font-bold ${isConfirmed ? "bg-white text-ink/45" : "bg-sage text-moss"}`}>
-              <Check size={18} /> {isConfirmed ? "Schon bestaetigt" : "Spot bestaetigen"}
+              <Check size={18} /> {isConfirmed ? "Schon bestätigt" : "Spot bestätigen"}
             </button>
             <a href={mapsUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-2xl bg-ink px-5 py-3 font-bold text-white">
               <MapPinned size={18} /> Route in Google Maps
@@ -1199,21 +1591,33 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
               <span className="rounded-full bg-cream px-3 py-1 text-xs font-bold text-ink/50">{comments.length}</span>
             </div>
             <div className="mt-4 space-y-2">
-              {comments.map((comment) => (
-                <div key={comment.id} className="rounded-2xl bg-cream p-4 text-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <b>{comment.author}</b>
-                    <span className="text-xs font-semibold text-ink/45">{formatCommentDate(comment.createdAt)}</span>
-                  </div>
-                  <p className="mt-2 leading-6 text-ink/70">{comment.text}</p>
-                </div>
+              {commentThreads.map((thread) => (
+                <CommentThread
+                  key={thread.comment.id}
+                  thread={thread}
+                  isLoggedIn={isLoggedIn}
+                  replyTarget={replyTarget}
+                  replyText={replyText}
+                  setReplyText={setReplyText}
+                  currentUserId={user?.id || ""}
+                  deleteComment={deleteOwnComment}
+                  startReply={(comment, parent) => {
+                    setReplyTarget({ parentId: parent.id, author: comment.author });
+                    setReplyText("");
+                  }}
+                  cancelReply={() => {
+                    setReplyTarget(null);
+                    setReplyText("");
+                  }}
+                  submitReply={() => { if (replyTarget) submitComment(replyTarget.parentId); }}
+                />
               ))}
               {comments.length === 0 && <div className="rounded-2xl bg-cream p-4 text-sm text-ink/60">Noch keine Kommentare.</div>}
             </div>
             <div className="mt-4">
               <textarea value={commentText} onChange={(event) => setCommentText(event.target.value)} disabled={!isLoggedIn} className="min-h-24 w-full rounded-2xl bg-cream px-4 py-3 outline-none disabled:text-ink/45" placeholder={isLoggedIn ? "Kommentar schreiben..." : "Zum Kommentieren bitte anmelden."} />
               {isLoggedIn ? (
-                <button type="button" onClick={submitComment} className="mt-3 rounded-2xl bg-moss px-5 py-3 font-bold text-white">Kommentar senden</button>
+                <button type="button" onClick={() => submitComment(null)} className="mt-3 rounded-2xl bg-moss px-5 py-3 font-bold text-white">Kommentar senden</button>
               ) : (
                 <button type="button" onClick={() => { close(); setScreen("profile"); }} className="mt-3 inline-flex items-center gap-2 rounded-2xl bg-moss px-5 py-3 font-bold text-white">
                   <LogIn size={18} /> Zum Kommentieren anmelden
@@ -1223,14 +1627,76 @@ function FindDetailModal({ find, finds, confirmFind, close, setScreen, user }: {
             </div>
           </section>
         </div>
+        </div>
       </article>
       {imageOpen && find.imageDataUrl && (
         <div className="fixed inset-0 z-[1100] grid place-items-center bg-ink/90 p-4" role="dialog" aria-modal="true">
-          <button onClick={() => setImageOpen(false)} className="absolute right-4 top-4 grid size-11 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Bild schliessen"><X size={20} /></button>
+          <button onClick={() => setImageOpen(false)} className="absolute right-4 top-4 grid size-11 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Bild schließen"><X size={20} /></button>
           <img src={find.imageDataUrl} alt={find.name} className="max-h-[88vh] max-w-[94vw] rounded-3xl bg-white object-contain p-2 shadow-soft" />
         </div>
       )}
       {publicProfile && <PublicProfileModal profile={publicProfile} finds={finds} close={() => setPublicProfile(null)} />}
+    </div>
+  );
+}
+
+function CommentThread({ thread, isLoggedIn, replyTarget, replyText, setReplyText, currentUserId, deleteComment, startReply, cancelReply, submitReply }: {
+  thread: { comment: SpotComment; replies: SpotComment[] };
+  isLoggedIn: boolean;
+  replyTarget: { parentId: number; author: string } | null;
+  replyText: string;
+  setReplyText: (value: string) => void;
+  currentUserId: string;
+  deleteComment: (comment: SpotComment) => void;
+  startReply: (comment: SpotComment, parent: SpotComment) => void;
+  cancelReply: () => void;
+  submitReply: () => void;
+}) {
+  const isReplying = replyTarget?.parentId === thread.comment.id;
+  return (
+    <div className="rounded-2xl bg-cream p-4 text-sm">
+      <CommentBubble comment={thread.comment} isReply={false} isLoggedIn={isLoggedIn} canDelete={thread.comment.userId === currentUserId} startReply={(comment) => startReply(comment, thread.comment)} deleteComment={deleteComment} />
+      {thread.replies.length > 0 && (
+        <div className="mt-3 space-y-2 border-l-2 border-moss/20 pl-3">
+          {thread.replies.map((reply) => (
+            <CommentBubble key={reply.id} comment={reply} isReply isLoggedIn={isLoggedIn} canDelete={reply.userId === currentUserId} startReply={(comment) => startReply(comment, thread.comment)} deleteComment={deleteComment} />
+          ))}
+        </div>
+      )}
+      {isReplying && (
+        <div className="mt-3 rounded-2xl bg-white p-3">
+          <p className="text-xs font-bold text-moss">Antwort an {replyTarget.author}</p>
+          <textarea value={replyText} onChange={(event) => setReplyText(event.target.value)} className="mt-2 min-h-20 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="Antwort schreiben..." />
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" onClick={submitReply} className="rounded-full bg-moss px-4 py-2 text-sm font-bold text-white">Antwort senden</button>
+            <button type="button" onClick={cancelReply} className="rounded-full bg-cream px-4 py-2 text-sm font-bold text-ink/60">Abbrechen</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CommentBubble({ comment, isReply, isLoggedIn, canDelete, startReply, deleteComment }: { comment: SpotComment; isReply: boolean; isLoggedIn: boolean; canDelete: boolean; startReply: (comment: SpotComment) => void; deleteComment: (comment: SpotComment) => void }) {
+  return (
+    <div className={isReply ? "rounded-2xl bg-white p-3" : ""}>
+      <div className="flex items-center justify-between gap-3">
+        <b>{comment.author}</b>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-ink/45">{formatCommentDate(comment.createdAt)}</span>
+          {canDelete && (
+            <button type="button" onClick={() => deleteComment(comment)} className="grid size-7 place-items-center rounded-full bg-cream text-ink/45 transition hover:bg-tomato hover:text-white" aria-label="Kommentar löschen">
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
+      </div>
+      <p className="mt-2 leading-6 text-ink/70">{comment.text}</p>
+      {isLoggedIn && (
+        <button type="button" onClick={() => startReply(comment)} className="mt-2 text-xs font-black uppercase tracking-wide text-moss">
+          Antworten
+        </button>
+      )}
     </div>
   );
 }
@@ -1243,19 +1709,19 @@ function PublicProfileModal({ profile, finds, close }: { profile: { id?: string;
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="grid size-14 place-items-center rounded-2xl bg-moss text-2xl font-black text-white">{profile.name.slice(0, 1).toUpperCase()}</div>
-            <p className="mt-4 text-sm font-bold uppercase text-moss">Oeffentliches Profil</p>
+            <p className="mt-4 text-sm font-bold uppercase text-moss">Öffentliches Profil</p>
             <h2 className="mt-1 text-3xl font-bold">{profile.name}</h2>
-            <p className="mt-2 text-sm leading-6 text-ink/60">Geteilte Spots sind oeffentlich. Scans sind standardmaessig privat.</p>
+            <p className="mt-2 text-sm leading-6 text-ink/60">Geteilte Spots sind öffentlich. Scans sind standardmäßig privat.</p>
           </div>
-          <button onClick={close} className="grid size-10 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Profil schliessen"><X size={18} /></button>
+          <button onClick={close} className="grid size-10 place-items-center rounded-full bg-white text-ink shadow-soft" aria-label="Profil schließen"><X size={18} /></button>
         </div>
         <div className="mt-5 grid grid-cols-2 gap-3">
-          <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Oeffentliche Spots</span><b className="text-2xl text-moss">{publicSpots.length}</b></div>
+          <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">öffentliche Spots</span><b className="text-2xl text-moss">{publicSpots.length}</b></div>
           <div className="rounded-2xl bg-white p-4"><span className="block text-xs font-bold uppercase text-ink/45">Scans</span><b className="text-lg text-ink/50">privat</b></div>
         </div>
         <div className="mt-5 space-y-3">
           {publicSpots.map((spot) => <ProfileSpotCard key={spot.id} spot={spot} />)}
-          {publicSpots.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-ink/60">Noch keine oeffentlichen Spots.</p>}
+          {publicSpots.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-ink/60">Noch keine öffentlichen Spots.</p>}
         </div>
       </article>
     </div>
@@ -1282,7 +1748,7 @@ function AddFindScreen({ addFind, setScreen, user }: { addFind: (find: Community
     if (!spotCameraActive || !spotVideoRef.current || !spotStreamRef.current) return;
     const video = spotVideoRef.current;
     video.srcObject = spotStreamRef.current;
-    void video.play().catch(() => setPlaceError("Kamera konnte nicht gestartet werden. Bitte Browser-Berechtigung pruefen."));
+    void video.play().catch(() => setPlaceError("Kamera konnte nicht gestartet werden. Bitte Browser-Berechtigung prüfen."));
   }, [spotCameraActive]);
 
   useEffect(() => {
@@ -1316,7 +1782,7 @@ function AddFindScreen({ addFind, setScreen, user }: { addFind: (find: Community
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedPlace) {
-      setPlaceError("Bitte waehle einen vorgeschlagenen echten Ort aus.");
+      setPlaceError("Bitte wähle einen vorgeschlagenen echten Ort aus.");
       return;
     }
     const form = new FormData(event.currentTarget);
@@ -1347,7 +1813,7 @@ function AddFindScreen({ addFind, setScreen, user }: { addFind: (find: Community
 
   async function startSpotCamera() {
     if (!navigator.mediaDevices?.getUserMedia) {
-      setPlaceError("Kamerazugriff ist in diesem Browser nicht verfuegbar.");
+      setPlaceError("Kamerazugriff ist in diesem Browser nicht verfügbar.");
       return;
     }
 
@@ -1386,17 +1852,17 @@ function AddFindScreen({ addFind, setScreen, user }: { addFind: (find: Community
 
   return (
     <>
-      <Header eyebrow="Community" title="Essen oder Produkt hinzufuegen" />
+      <Header eyebrow="Community" title="Essen oder Produkt hinzufügen" />
       <div className="mb-4 rounded-3xl bg-sage p-5">
-        <p className="font-bold text-moss">Kein Login noetig.</p>
-        <p className="mt-1 text-sm leading-6 text-ink/70">Du kannst direkt beitragen. Anmeldung ist spaeter nur praktisch, wenn du deine Spots bearbeiten, speichern oder zwischen Geraeten synchronisieren willst.</p>
+        <p className="font-bold text-moss">Kein Login nötig.</p>
+        <p className="mt-1 text-sm leading-6 text-ink/70">Du kannst direkt beitragen. Anmeldung ist später nur praktisch, wenn du deine Spots bearbeiten, speichern oder zwischen Geräten synchronisieren willst.</p>
       </div>
       <form onSubmit={submit} className="grid gap-4 rounded-3xl bg-white p-5 shadow-soft sm:grid-cols-2">
         <div className="rounded-3xl bg-cream p-4 sm:col-span-2">
           <div className="flex items-center justify-between gap-3">
             <div>
               <span className="font-bold">Foto</span>
-              <p className="mt-1 text-sm text-ink/55">Waehle ein Bild aus der Galerie oder fotografiere den Spot direkt.</p>
+              <p className="mt-1 text-sm text-ink/55">Wähle ein Bild aus der Galerie oder fotografiere den Spot direkt.</p>
             </div>
             {imageDataUrl && <button type="button" onClick={() => setImageDataUrl("")} className="grid size-9 shrink-0 place-items-center rounded-full bg-white text-ink/55 hover:bg-tomato hover:text-white" aria-label="Foto entfernen"><X size={16} /></button>}
           </div>
@@ -1414,7 +1880,7 @@ function AddFindScreen({ addFind, setScreen, user }: { addFind: (find: Community
               <video ref={spotVideoRef} className="aspect-video w-full rounded-2xl bg-ink object-cover" muted playsInline />
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <button type="button" onClick={captureSpotPhoto} className="rounded-2xl bg-moss px-4 py-3 font-bold text-white">Foto aufnehmen</button>
-                <button type="button" onClick={stopSpotCamera} className="rounded-2xl bg-cream px-4 py-3 font-bold text-ink/70">Schliessen</button>
+                <button type="button" onClick={stopSpotCamera} className="rounded-2xl bg-cream px-4 py-3 font-bold text-ink/70">Schließen</button>
               </div>
             </div>
           )}
@@ -1424,9 +1890,9 @@ function AddFindScreen({ addFind, setScreen, user }: { addFind: (find: Community
         <div className="sm:col-span-2">
           <label>
             <span className="font-bold">Restaurant oder Location</span>
-            <input value={placeQuery} onChange={(event) => { setPlaceQuery(event.target.value); setSelectedPlace(null); }} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="z.B. Cafe Kranz Koeln, Rewe Ehrenfeld, Kiez Kebab Hamburg" required />
+            <input value={placeQuery} onChange={(event) => { setPlaceQuery(event.target.value); setSelectedPlace(null); }} className="mt-2 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="z.B. Café Kranz Köln, Rewe Ehrenfeld, Kiez Kebab Hamburg" required />
           </label>
-          <p className="mt-2 text-xs text-ink/55">Speichern geht nur mit einem ausgewaehlten echten Ort aus der Vorschlagsliste.</p>
+          <p className="mt-2 text-xs text-ink/55">Speichern geht nur mit einem ausgewählten echten Ort aus der Vorschlagsliste.</p>
           {placeLoading && <p className="mt-2 text-sm font-bold text-moss">Standorte werden gesucht...</p>}
           {placeError && <p className="mt-2 text-sm font-semibold text-tomato">{placeError}</p>}
           {selectedPlace && <div className="mt-3 rounded-2xl bg-sage p-3 text-sm"><b>{selectedPlace.name}</b><p className="text-ink/65">{selectedPlace.address}</p><p className="mt-1 text-xs font-bold text-moss">Quelle: {selectedPlace.provider}</p></div>}
@@ -1444,7 +1910,7 @@ function AddFindScreen({ addFind, setScreen, user }: { addFind: (find: Community
         </div>
         <PriceField />
         <Select name="status" label="Einordnung" options={["vegan", "vegetarisch"]} />
-        <Select name="category" label="Kategorie" options={categories.slice(1)} />
+        <Select name="category" label="Kategorie" options={categories} />
         <label className="sm:col-span-2"><span className="font-bold">Kurze Beschreibung</span><textarea name="description" required className="mt-2 min-h-28 w-full rounded-2xl bg-cream px-4 py-3 outline-none focus:ring-2 focus:ring-moss" placeholder="Was macht den Spot besonders? Was sollte man beim Bestellen beachten?" /></label>
         <button disabled={saving} className="rounded-2xl bg-moss px-5 py-4 text-lg font-bold text-white shadow-soft disabled:opacity-60 sm:col-span-2">{saving ? "Wird gespeichert..." : "Spot auf die Karte bringen"}</button>
         {submitted && <button type="button" onClick={() => setScreen("map")} className="rounded-2xl bg-sage px-5 py-3 font-bold text-moss sm:col-span-2"><Check className="mr-2 inline" size={18} /> Gespeichert, zur Karte</button>}
@@ -1508,7 +1974,7 @@ function resizeImage(file: File, maxSize: number) {
         canvas.height = Math.round(image.height * scale);
         const context = canvas.getContext("2d");
         if (!context) {
-          reject(new Error("Canvas nicht verfuegbar."));
+          reject(new Error("Canvas nicht verfügbar."));
           return;
         }
         context.drawImage(image, 0, 0, canvas.width, canvas.height);
@@ -1533,7 +1999,7 @@ function createScanThumbnail(imageDataUrl: string) {
     const image = new Image();
     image.onerror = () => resolveImage("");
     image.onload = () => {
-      const maxSize = 1000;
+      const maxSize = 420;
       const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
       const canvas = document.createElement("canvas");
       canvas.width = Math.max(1, Math.round(image.width * scale));
@@ -1544,7 +2010,7 @@ function createScanThumbnail(imageDataUrl: string) {
         return;
       }
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      resolveImage(canvas.toDataURL("image/jpeg", 0.78));
+      resolveImage(canvas.toDataURL("image/jpeg", 0.7));
     };
     image.src = imageDataUrl;
   });
@@ -1612,7 +2078,7 @@ function compactScanHistoryItem(item: ScanHistoryItem): ScanHistoryItem {
 }
 
 function compactScanPhoto(photo: string) {
-  return photo.length < 750_000 ? photo : "";
+  return photo.length < 180_000 ? photo : "";
 }
 
 function mergeScanHistory(primary: ScanHistoryItem[], secondary: ScanHistoryItem[] = []) {
@@ -1644,26 +2110,53 @@ function scanRowToHistoryItem(row: ScanRow): ScanHistoryItem | null {
   return null;
 }
 
-function PricingScreen() {
+function PricingScreen({ premium, user, setScreen }: { premium: PremiumState; user: AuthUser | null; setScreen: (screen: Screen) => void }) {
   return (
     <>
-      <Header eyebrow="Premium" title="Premium bleibt optional." />
-      <section className="grid gap-4 md:grid-cols-2">
-        {pricing.map((tier) => (
-          <article key={tier.name} className={`rounded-3xl p-6 shadow-soft ${tier.name === "Premium" ? "bg-ink text-white" : "bg-white"}`}>
-            <h2 className="text-2xl font-bold">{tier.name}</h2>
-            <p className={`mt-2 text-3xl font-bold ${tier.name === "Premium" ? "text-honey" : "text-moss"}`}>{tier.price}</p>
-            <ul className="mt-5 space-y-3">
-              {tier.perks.map((perk) => <li key={perk} className="flex gap-3"><Check className="shrink-0 text-leaf" /> <span>{perk}</span></li>)}
-            </ul>
-          </article>
-        ))}
+      <Header eyebrow="Premium" title="Unbegrenzt scannen." />
+      <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.8fr)]">
+        <article className="rounded-[28px] bg-ink p-6 text-white shadow-soft">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-black uppercase tracking-wide text-honey">Veggie Navigator Premium</p>
+              <h2 className="mt-2 text-4xl font-black">4,99 € / Monat</h2>
+              <p className="mt-3 max-w-xl leading-7 text-white/70">Für Nutzer, die wirklich oft scannen: keine Tagesgrenze, bessere Speisekartenanalyse und später Preisalarme für Produkte in deiner Nähe.</p>
+            </div>
+            <span className={`rounded-full px-4 py-2 text-sm font-black ${premium.isPremium ? "bg-leaf text-white" : "bg-white text-ink"}`}>{premium.isPremium ? "Aktiv" : "Noch nicht aktiv"}</span>
+          </div>
+          <div className="mt-6 grid gap-3 sm:grid-cols-2">
+            {["Unbegrenzte Barcode-, Zutaten- und Speisekarten-Scans", "Mehrseitige Speisekarten bequem auswerten", "Scan-Verlauf dauerhaft mit deinem Account synchronisieren", "Vorbereitung für Preisalarme und Lieblingsspots"].map((perk) => (
+              <div key={perk} className="rounded-2xl bg-white/10 p-4">
+                <Check className="text-honey" />
+                <p className="mt-3 text-sm font-bold leading-6">{perk}</p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button type="button" onClick={() => user ? setScreen("scanner") : setScreen("profile")} className="rounded-2xl bg-honey px-5 py-3 font-black text-ink shadow-soft">
+              {premium.isPremium ? "Zum Scanner" : user ? "Premium später mit Stripe starten" : "Erst einloggen"}
+            </button>
+            <button type="button" onClick={() => setScreen("profile")} className="rounded-2xl bg-white/10 px-5 py-3 font-bold text-white">Profil ansehen</button>
+          </div>
+        </article>
+        <aside className="rounded-[28px] bg-white p-6 shadow-soft">
+          <p className="text-sm font-black uppercase tracking-wide text-moss">Premium v1</p>
+          <h3 className="mt-2 text-2xl font-black">Aktuell manuell testbar</h3>
+          <p className="mt-3 text-sm leading-6 text-ink/60">Stripe kommt als nächster Schritt. Für jetzt kannst du Premium in Supabase aktivieren und sofort testen, ob unbegrenzte Scans greifen.</p>
+          <div className="mt-5 rounded-2xl bg-cream p-4 text-sm">
+            <p className="font-black text-ink">Dein Status</p>
+            <p className="mt-2 text-ink/65">Plan: <b>{premium.plan}</b></p>
+            <p className="text-ink/65">Status: <b>{premium.status}</b></p>
+            <p className="text-ink/65">Premium: <b>{premium.isPremium ? "ja" : "nein"}</b></p>
+          </div>
+          <p className="mt-4 text-xs leading-5 text-ink/45">SQL zum Aktivieren liegt in <b>supabase/premium-v1.sql</b>.</p>
+        </aside>
       </section>
     </>
   );
 }
 
-function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen: Screen) => void; user: AuthUser | null; setUser: (user: AuthUser | null) => void; finds: Find[] }) {
+function ProfileScreen({ setScreen, user, setUser, finds, premium, setPremium, dietaryPreferences, setDietaryPreferences, favoriteProducts }: { setScreen: (screen: Screen) => void; user: AuthUser | null; setUser: (user: AuthUser | null) => void; finds: Find[]; premium: PremiumState; setPremium: (premium: PremiumState) => void; dietaryPreferences: DietaryPreferences; setDietaryPreferences: (preferences: DietaryPreferences) => void; favoriteProducts: FavoriteProduct[] }) {
   const [profileName, setProfileName] = useState("");
   const [email, setEmail] = useState(user?.email || "");
   const [password, setPassword] = useState("");
@@ -1672,32 +2165,83 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
   const [loadingAuth, setLoadingAuth] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
   const [editProfileName, setEditProfileName] = useState(user ? getUserDisplayName(user) : "");
+  const [avatarUrl, setAvatarUrl] = useState(getUserAvatarUrl(user));
+  const [editAvatarUrl, setEditAvatarUrl] = useState(getUserAvatarUrl(user));
   const [privacy, setPrivacy] = useState<ProfilePrivacy>(readProfilePrivacy);
   const [remoteScans, setRemoteScans] = useState<ScanHistoryItem[]>([]);
   const [previewImage, setPreviewImage] = useState<{ src: string; title: string } | null>(null);
   const [detailScan, setDetailScan] = useState<ScanHistoryItem | null>(null);
-  const mySpotIds = readMySpotIds();
-  const mySpots = finds.filter((find) => find.createdBy === user?.id || mySpotIds.includes(find.id));
+  const mySpotIds = user ? [] : readMySpotIds();
+  const mySpots = finds.filter((find) => user ? find.createdBy === user.id : mySpotIds.includes(find.id));
   const totalConfirmations = mySpots.reduce((sum, find) => sum + (find.confirmations ?? 0), 0);
   const scans = user ? remoteScans : readScanHistory();
 
   useEffect(() => {
     saveProfilePrivacy(privacy);
-    if (user) {
-      const payload: ProfilePayload = {
-        id: user.id,
-        profileName: getUserDisplayName(user),
-        ...privacy
-      };
-      void saveUserProfile(payload).catch(console.warn);
-    }
   }, [privacy]);
+
+  function saveProfileSettings(nextPreferences = dietaryPreferences, nextPrivacy = privacy) {
+    if (!user) {
+      saveDietaryPreferences(nextPreferences);
+      saveProfilePrivacy(nextPrivacy);
+      return;
+    }
+    saveDietaryPreferences(nextPreferences, user.id);
+    saveProfilePrivacy(nextPrivacy);
+    void saveUserProfile({
+      id: user.id,
+      profileName: getUserDisplayName(user),
+      dietMode: nextPreferences.diet,
+      warningIngredients: nextPreferences.warnings,
+      ...nextPrivacy
+    }).catch((error) => {
+      console.warn(error);
+      setMessage(error instanceof Error ? error.message : "Profil-Einstellungen konnten nicht gespeichert werden.");
+    });
+  }
+
+  function updateDietMode(diet: DietMode) {
+    const nextPreferences = { ...dietaryPreferences, diet };
+    setDietaryPreferences(nextPreferences);
+    saveProfileSettings(nextPreferences);
+  }
+
+  function toggleWarningIngredient(ingredient: string) {
+    const warnings = dietaryPreferences.warnings.includes(ingredient)
+      ? dietaryPreferences.warnings.filter((item) => item !== ingredient)
+      : [...dietaryPreferences.warnings, ingredient];
+    const nextPreferences = { ...dietaryPreferences, warnings };
+    setDietaryPreferences(nextPreferences);
+    saveProfileSettings(nextPreferences);
+  }
+
+  function updatePrivacy(nextPrivacy: ProfilePrivacy) {
+    setPrivacy(nextPrivacy);
+    saveProfileSettings(dietaryPreferences, nextPrivacy);
+  }
+
+  useEffect(() => {
+    if (!user) return;
+    const currentAvatar = getUserAvatarUrl(user);
+    if (currentAvatar && !avatarUrl) {
+      setAvatarUrl(currentAvatar);
+      setEditAvatarUrl(currentAvatar);
+    }
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user) return;
     let active = true;
     void fetchProfile(user.id).then((profile) => {
       if (!active || !profile) return;
+      setAvatarUrl(profile.avatarUrl || getUserAvatarUrl(user));
+      setEditAvatarUrl(profile.avatarUrl || getUserAvatarUrl(user));
+      setPremium({
+        isPremium: Boolean(profile.isPremium),
+        status: profile.premiumStatus || "free",
+        plan: profile.premiumPlan || "free",
+        premiumUntil: profile.premiumUntil || null
+      });
       setPrivacy({
         publicSpots: profile.publicSpots,
         publicScans: profile.publicScans
@@ -1718,15 +2262,15 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
     setMessage("");
     try {
       if (authMode === "register" && !profileName.trim()) {
-        setMessage("Bitte waehle einen Profilnamen.");
+        setMessage("Bitte wähle einen Profilnamen.");
         setLoadingAuth(false);
         return;
       }
       const authUser = authMode === "login" ? await signInWithPassword(email, password) : await signUpWithPassword(email, password, profileName.trim());
       if (authUser) setUser(authUser);
-      setMessage(authMode === "login" ? "Du bist eingeloggt." : "Account erstellt. Falls Supabase E-Mail-Bestaetigung verlangt, bitte Postfach pruefen.");
+      setMessage(authMode === "login" ? "Du bist eingeloggt." : "Account erstellt. Falls Supabase E-Mail-Bestätigung verlangt, bitte Postfach prüfen.");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Anmeldung gerade nicht moeglich.");
+      setMessage(error instanceof Error ? error.message : "Anmeldung gerade nicht möglich.");
     } finally {
       setLoadingAuth(false);
     }
@@ -1738,13 +2282,17 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
     try {
       await signInWithOAuth(provider);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : `${provider} Login gerade nicht moeglich.`);
+      setMessage(error instanceof Error ? error.message : `${provider} Login gerade nicht möglich.`);
       setLoadingAuth(false);
     }
   }
 
   async function signOut() {
-    await logout();
+    try {
+      await logout();
+    } catch (error) {
+      console.warn(error);
+    }
     setUser(null);
     setMessage("Du bist abgemeldet.");
   }
@@ -1759,8 +2307,10 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
     setMessage("");
     try {
       const updatedUser = await updateProfileName(nextName);
-      setUser(updatedUser);
-      await saveUserProfile({ id: updatedUser.id, profileName: nextName, ...privacy });
+      const cleanedUser = await clearProfileAvatarMetadata();
+      setUser(cleanedUser || updatedUser);
+      setAvatarUrl(editAvatarUrl);
+      await saveUserProfile({ id: updatedUser.id, profileName: nextName, avatarUrl: editAvatarUrl, dietMode: dietaryPreferences.diet, warningIngredients: dietaryPreferences.warnings, ...privacy });
       setEditingProfile(false);
       setMessage("Profil aktualisiert.");
     } catch (error) {
@@ -1770,15 +2320,27 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
     }
   }
 
+  async function handleProfileAvatar(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      setEditAvatarUrl(await resizeImage(file, 360));
+    } catch {
+      setMessage("Profilbild konnte nicht gelesen werden.");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
   function deleteProfileScan(id: number) {
     setRemoteScans((current) => current.filter((scan) => scan.id !== id));
     setDetailScan((current) => current?.id === id ? null : current);
     if (!user) return;
     void deleteRemoteScan(user.id, id).then(() => {
-      setMessage("Scan geloescht.");
+      setMessage("Scan gelöscht.");
     }).catch((error) => {
       console.warn(error);
-      setMessage("Scan wurde ausgeblendet, aber noch nicht in Supabase geloescht.");
+      setMessage("Scan wurde ausgeblendet, aber noch nicht in Supabase gelöscht.");
     });
   }
 
@@ -1786,11 +2348,22 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
     <>
       <Header eyebrow="Profil" title={user ? "Dein Profil" : "Einloggen"} />
       {user ? (
-        <section className="space-y-5">
-          <div className="rounded-[28px] border border-oat/70 bg-white p-5 shadow-soft md:p-6">
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem] xl:items-center">
-              <div className="flex min-w-0 gap-4">
-                <div className="grid size-16 shrink-0 place-items-center rounded-2xl bg-moss text-2xl font-black text-white shadow-sm">{getUserDisplayName(user).slice(0, 1).toUpperCase()}</div>
+        <section className="profile-mobile-shell min-w-0 space-y-4 pb-28 sm:space-y-5 md:pb-0">
+          <div className="profile-mobile-panel rounded-[24px] border border-oat/70 bg-white p-4 shadow-soft sm:rounded-[28px] sm:p-5 md:p-6">
+            <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem] xl:items-center">
+              <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:gap-4">
+                <div className="shrink-0">
+                  <ProfileAvatar user={user} avatarUrl={editingProfile ? editAvatarUrl : avatarUrl} />
+                  {editingProfile && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <label className="cursor-pointer rounded-xl bg-sage px-3 py-2 text-xs font-bold text-moss">
+                        Bild wählen
+                        <input type="file" accept="image/*" onChange={(event) => void handleProfileAvatar(event)} className="sr-only" />
+                      </label>
+                      {editAvatarUrl && <button type="button" onClick={() => setEditAvatarUrl("")} className="rounded-xl bg-cream px-3 py-2 text-xs font-bold text-ink/55">Entfernen</button>}
+                    </div>
+                  )}
+                </div>
                 <div className="min-w-0 flex-1">
                   <p className="text-xs font-black uppercase tracking-wide text-moss">Veggie Profil</p>
                 {editingProfile ? (
@@ -1801,34 +2374,43 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
                     </label>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button onClick={() => void saveProfile()} disabled={loadingAuth} className="rounded-2xl bg-moss px-4 py-2 text-sm font-bold text-white disabled:opacity-60">Speichern</button>
-                      <button onClick={() => { setEditingProfile(false); setEditProfileName(getUserDisplayName(user)); }} className="rounded-2xl border border-oat bg-white px-4 py-2 text-sm font-bold text-ink/65">Abbrechen</button>
+                      <button onClick={() => { setEditingProfile(false); setEditProfileName(getUserDisplayName(user)); setEditAvatarUrl(avatarUrl); }} className="rounded-2xl border border-oat bg-white px-4 py-2 text-sm font-bold text-ink/65">Abbrechen</button>
                     </div>
                   </div>
                 ) : (
-                  <h2 className="mt-1 break-words text-3xl font-black leading-tight text-ink md:text-4xl">{getUserDisplayName(user)}</h2>
+                  <h2 className="mt-1 break-words text-2xl font-black leading-tight text-ink sm:text-3xl md:text-4xl">{getUserDisplayName(user)}</h2>
                 )}
                   <p className="mt-1 break-all text-sm font-semibold text-ink/45">{user.email}</p>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <button onClick={() => { setEditingProfile(true); setEditProfileName(getUserDisplayName(user)); }} className="rounded-2xl bg-moss px-4 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-leaf">Profil bearbeiten</button>
-                    <button onClick={() => setScreen("add")} className="rounded-2xl border border-oat bg-cream px-4 py-2.5 text-sm font-bold text-moss hover:bg-sage">Spot teilen</button>
-                    <button onClick={() => void signOut()} className="rounded-2xl border border-oat bg-white px-4 py-2.5 text-sm font-bold text-ink/55 hover:bg-cream">Abmelden</button>
+                  <div className="mt-4 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+                    <button onClick={() => { setEditingProfile(true); setEditProfileName(getUserDisplayName(user)); setEditAvatarUrl(avatarUrl || getUserAvatarUrl(user)); }} className="rounded-2xl bg-moss px-3 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-leaf sm:px-4">Profil bearbeiten</button>
+                    <button onClick={() => setScreen("add")} className="rounded-2xl border border-oat bg-cream px-3 py-2.5 text-sm font-bold text-moss hover:bg-sage sm:px-4">Spot teilen</button>
+                    <button onClick={() => void signOut()} className="col-span-2 rounded-2xl border border-oat bg-white px-3 py-2.5 text-sm font-bold text-ink/55 hover:bg-cream sm:col-span-1 sm:px-4">Abmelden</button>
                   </div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <ProfileStat label="Spots" value={String(mySpots.length)} />
-                <ProfileStat label="Bestaetigt" value={String(totalConfirmations)} />
+                <ProfileStat label="Bestätigt" value={String(totalConfirmations)} />
+              </div>
+              <div className="rounded-2xl border border-oat bg-cream p-4 xl:col-span-2">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <span className="block text-xs font-black uppercase tracking-wide text-ink/45">Premium</span>
+                    <b className="mt-1 block text-lg text-moss">{premium.isPremium ? "Aktiv - unbegrenzte Scans" : "Free - 5 Scans pro Tag"}</b>
+                  </div>
+                  <button type="button" onClick={() => setScreen("pricing")} className="rounded-2xl bg-ink px-4 py-2 text-sm font-bold text-white">{premium.isPremium ? "Premium ansehen" : "Premium holen"}</button>
+                </div>
               </div>
             </div>
           </div>
-          <section className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(20rem,0.75fr)]">
-            <div className="rounded-[28px] border border-oat/70 bg-white p-5 shadow-soft">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+          <section className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(20rem,0.75fr)]">
+            <div className="profile-mobile-panel rounded-[24px] border border-oat/70 bg-white p-4 shadow-soft sm:rounded-[28px] sm:p-5">
+              <div className="grid gap-3 sm:flex sm:items-center sm:justify-between">
                 <div>
-                  <p className="text-xs font-black uppercase tracking-wide text-moss">Meine Beitraege</p>
+                  <p className="text-xs font-black uppercase tracking-wide text-moss">Meine Beiträge</p>
                   <h3 className="mt-1 text-2xl font-black">Deine Spots</h3>
                 </div>
-                <button onClick={() => setScreen("add")} className="rounded-2xl bg-moss px-4 py-3 text-sm font-bold text-white shadow-sm">Spot hinzufuegen</button>
+                <button onClick={() => setScreen("add")} className="max-w-full rounded-2xl bg-moss px-4 py-3 text-sm font-bold text-white shadow-sm sm:w-auto">Spot hinzufügen</button>
               </div>
               <div className="mt-5 space-y-3">
                 {mySpots.map((spot) => <ProfileSpotCard key={spot.id} spot={spot} setScreen={setScreen} />)}
@@ -1836,7 +2418,7 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
                   <div className="rounded-3xl border border-dashed border-oat bg-cream p-6 text-center">
                     <Store className="mx-auto text-moss" size={36} />
                     <p className="mt-3 text-lg font-bold">Noch keine eigenen Spots</p>
-                    <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-ink/60">Fuege deinen ersten Fund hinzu. Danach erscheint er hier in deinem Profil.</p>
+                    <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-ink/60">Füge deinen ersten Fund hinzu. Danach erscheint er hier in deinem Profil.</p>
                     <button onClick={() => setScreen("add")} className="mt-4 rounded-2xl bg-moss px-5 py-3 font-bold text-white">Ersten Spot teilen</button>
                   </div>
                 )}
@@ -1844,12 +2426,50 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
             </div>
             <aside className="space-y-5">
               <div className="rounded-[28px] border border-oat/70 bg-white p-5 shadow-soft">
+                <p className="text-xs font-black uppercase tracking-wide text-moss">Ernährungsprofil</p>
+                <h3 className="mt-1 text-xl font-black">Deine Regeln</h3>
+                <div className="mt-4 grid grid-cols-3 gap-2 rounded-2xl bg-cream p-1">
+                  {(["vegan", "vegetarisch", "flexitarisch"] as DietMode[]).map((diet) => (
+                    <button key={diet} type="button" onClick={() => updateDietMode(diet)} className={`rounded-xl px-3 py-2 text-xs font-black ${dietaryPreferences.diet === diet ? "bg-moss text-white" : "bg-white text-ink/60"}`}>
+                      {dietLabel(diet)}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-4 text-sm font-bold text-ink/65">Warnen bei</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {warningOptions.map((option) => {
+                    const checked = dietaryPreferences.warnings.includes(option.id);
+                    return (
+                      <button key={option.id} type="button" onClick={() => toggleWarningIngredient(option.id)} className={`rounded-full px-3 py-2 text-xs font-bold ${checked ? "bg-moss text-white" : "bg-cream text-ink/55"}`}>
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="rounded-[28px] border border-oat/70 bg-white p-5 shadow-soft">
+                <p className="text-xs font-black uppercase tracking-wide text-moss">Gemerkte Produkte</p>
+                <h3 className="mt-1 text-xl font-black">Deine Auswahl</h3>
+                <div className="mt-4 space-y-2">
+                  {favoriteProducts.slice(0, 6).map((product) => (
+                    <div key={product.barcode} className="flex items-center gap-3 rounded-2xl bg-cream p-2">
+                      {product.imageUrl ? <img src={product.imageUrl} alt="" className="size-10 rounded-xl object-contain bg-white" /> : <span className="grid size-10 place-items-center rounded-xl bg-sage text-moss"><Heart size={16} /></span>}
+                      <div className="min-w-0 flex-1">
+                        <b className="block truncate text-sm">{product.name}</b>
+                        <span className="text-xs text-ink/50">{product.status}</span>
+                      </div>
+                    </div>
+                  ))}
+                  {favoriteProducts.length === 0 && <p className="rounded-2xl bg-cream p-4 text-sm text-ink/60">Noch keine Produkte gemerkt.</p>}
+                </div>
+              </div>
+              <div className="rounded-[28px] border border-oat/70 bg-white p-5 shadow-soft">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <p className="text-xs font-black uppercase tracking-wide text-moss">Meine Scans</p>
                     <h3 className="mt-1 text-xl font-black">Scan-Verlauf</h3>
                   </div>
-                  <span className={`rounded-full px-3 py-1 text-xs font-bold ${privacy.publicScans ? "bg-sage text-moss" : "bg-cream text-ink/45"}`}>{privacy.publicScans ? "oeffentlich" : "privat"}</span>
+                  <span className={`rounded-full px-3 py-1 text-xs font-bold ${privacy.publicScans ? "bg-sage text-moss" : "bg-cream text-ink/45"}`}>{privacy.publicScans ? "öffentlich" : "privat"}</span>
                 </div>
                 <div className="mt-4 max-h-80 space-y-2 overflow-y-auto">
                   {scans.map((scan) => <ProfileScanCard key={scan.id} scan={scan} openImage={setPreviewImage} openDetails={setDetailScan} deleteScan={deleteProfileScan} />)}
@@ -1857,13 +2477,13 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
                 </div>
               </div>
               <div className="rounded-[28px] border border-oat/70 bg-white p-5 shadow-soft">
-                <p className="text-xs font-black uppercase tracking-wide text-moss">Privatsphaere</p>
+                <p className="text-xs font-black uppercase tracking-wide text-moss">Privatsphäre</p>
                 <h3 className="mt-1 text-xl font-black">Sichtbarkeit</h3>
                 <div className="mt-4 space-y-3">
-                  <PrivacyToggle label="Geteilte Spots oeffentlich" checked={privacy.publicSpots} onChange={(checked) => setPrivacy((current) => ({ ...current, publicSpots: checked }))} />
-                  <PrivacyToggle label="Scans oeffentlich" checked={privacy.publicScans} onChange={(checked) => setPrivacy((current) => ({ ...current, publicScans: checked }))} />
+                  <PrivacyToggle label="Geteilte Spots öffentlich" checked={privacy.publicSpots} onChange={(checked) => updatePrivacy({ ...privacy, publicSpots: checked })} />
+                  <PrivacyToggle label="Scans öffentlich" checked={privacy.publicScans} onChange={(checked) => updatePrivacy({ ...privacy, publicScans: checked })} />
                 </div>
-                <p className="mt-3 text-xs leading-5 text-ink/50">Standard: Spots oeffentlich, Scans privat.</p>
+                <p className="mt-3 text-xs leading-5 text-ink/50">Standard: Spots öffentlich, Scans privat.</p>
               </div>
             </aside>
           </section>
@@ -1882,7 +2502,7 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
                   <h2 className="text-2xl font-bold">Dein Profil</h2>
                 </div>
               </div>
-              <p className="mt-4 max-w-xl text-sm leading-6 text-ink/60">Speichere deine Scans, kommentiere Spots und behalte deine eigenen Beitraege im Blick.</p>
+              <p className="mt-4 max-w-xl text-sm leading-6 text-ink/60">Speichere deine Scans, kommentiere Spots und behalte deine eigenen Beiträge im Blick.</p>
             </div>
             <div className="p-6">
               {!authConfigured && <p className="mb-4 rounded-2xl bg-tomato px-4 py-3 text-sm font-bold text-white">Supabase Auth fehlt noch: Setze `VITE_SUPABASE_URL` und `VITE_SUPABASE_ANON_KEY`.</p>}
@@ -1923,13 +2543,26 @@ function ProfileScreen({ setScreen, user, setUser, finds }: { setScreen: (screen
           </div>
           <aside className="rounded-[28px] border border-oat/70 bg-cream p-6">
             <p className="text-sm font-bold uppercase tracking-wide text-moss">Warum ein Profil?</p>
-            <h2 className="mt-2 text-2xl font-bold leading-tight">Alles, was du beitraegst, bleibt bei dir.</h2>
+            <h2 className="mt-2 text-2xl font-bold leading-tight">Mehr scannen, weniger verlieren.</h2>
+            <div className="mt-5 grid grid-cols-2 gap-3">
+              <div className="rounded-2xl bg-white p-4">
+                <span className="block text-xs font-black uppercase text-ink/40">Ohne Login</span>
+                <b className="mt-1 block text-2xl text-ink">3</b>
+                <span className="text-xs font-bold text-ink/50">Scans pro Tag</span>
+              </div>
+              <div className="rounded-2xl bg-moss p-4 text-white">
+                <span className="block text-xs font-black uppercase text-white/65">Mit Profil</span>
+                <b className="mt-1 block text-2xl text-honey">5</b>
+                <span className="text-xs font-bold text-white/75">Scans pro Tag</span>
+              </div>
+            </div>
             <div className="mt-5 space-y-3">
               {[
-                ["Scans speichern", "Deine letzten Checks bleiben mit deinem Account verbunden."],
-                ["Spots verwalten", "Eigene Fundorte erscheinen gesammelt in deinem Profil."],
-                ["Kommentieren", "Ergaenze Tipps und Updates zu Community-Spots."],
-                ["Privatsphaere", "Du entscheidest, was oeffentlich sichtbar ist."]
+                ["Mehr Tageslimit", "Mit Account bekommst du 5 statt 3 Scans pro Tag."],
+                ["Verlauf auf allen Geräten", "Gelöschte oder gespeicherte Scans bleiben zwischen Handy und PC synchron."],
+                ["Eigene Spots wiederfinden", "Deine hinzugefügten Orte landen gesammelt in deinem Profil."],
+                ["Mitreden", "Du kannst Spots kommentieren und echte Updates zur Community beitragen."],
+                ["Privatsphäre", "Spots sind öffentlich, Scans bleiben standardmäßig privat."]
               ].map(([title, text]) => (
                 <div key={title} className="flex gap-3">
                   <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-white text-moss"><Check size={15} /></span>
@@ -1955,24 +2588,24 @@ function ProfileStat({ label, value }: { label: string; value: string }) {
 
 function ProfileSpotCard({ spot, setScreen }: { spot: Find; setScreen?: (screen: Screen) => void }) {
   return (
-    <article className="flex gap-4 rounded-3xl bg-cream p-4">
-      <div className="grid size-20 shrink-0 place-items-center overflow-hidden rounded-2xl bg-oat text-moss">
-        {spot.imageDataUrl ? <img src={spot.imageDataUrl} alt="" className="h-full w-full object-cover" /> : <FindIcon category={spot.category} size={28} />}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <h4 className="font-bold">{spot.name}</h4>
-            <p className="mt-1 text-sm text-ink/55">{spot.place}</p>
+    <article className="profile-spot-card w-full max-w-full overflow-hidden rounded-3xl bg-cream p-3 sm:p-4">
+      <div className="flex min-w-0 gap-3">
+        <div className="grid size-[4.25rem] shrink-0 place-items-center overflow-hidden rounded-2xl bg-oat text-moss sm:size-20">
+          {spot.imageDataUrl ? <img src={spot.imageDataUrl} alt="" className="h-full w-full object-cover" /> : <FindIcon category={spot.category} size={28} />}
+        </div>
+        <div className="min-w-0 flex-1 overflow-hidden">
+          <div className="flex min-w-0 items-start justify-between gap-2">
+            <h4 className="min-w-0 truncate font-bold">{spot.name}</h4>
+            <span className="shrink-0"><Badge status={spot.status} /></span>
           </div>
-          <Badge status={spot.status} />
+          <p className="mt-1 line-clamp-2 break-words text-sm leading-6 text-ink/55">{getShortPlace(spot.place)}</p>
         </div>
-        <p className="mt-2 max-h-12 overflow-hidden text-sm leading-6 text-ink/70">{spot.description}</p>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-moss">{spot.price}</span>
-          <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-ink/50">{spot.confirmations ?? 0} bestaetigt</span>
-          {setScreen && <button onClick={() => setScreen("map")} className="rounded-full bg-moss px-3 py-1 text-xs font-bold text-white">Auf Karte ansehen</button>}
-        </div>
+      </div>
+      <p className="mt-3 line-clamp-2 max-w-full break-words text-sm leading-6 text-ink/70">{spot.description}</p>
+      <div className="mt-3 grid w-full max-w-full grid-cols-2 gap-2 text-xs sm:flex sm:flex-wrap sm:items-center">
+        <span className="min-w-0 truncate rounded-full bg-white px-3 py-1 text-center text-xs font-bold text-moss">{spot.price}</span>
+        <span className="min-w-0 truncate rounded-full bg-white px-3 py-1 text-center text-xs font-bold text-ink/50">{spot.confirmations ?? 0} bestätigt</span>
+        {setScreen && <button onClick={() => setScreen("map")} className="col-span-2 w-full rounded-full bg-moss px-3 py-2 text-xs font-bold text-white sm:col-span-1 sm:w-auto sm:py-1">Auf Karte ansehen</button>}
       </div>
     </article>
   );
@@ -1984,7 +2617,7 @@ function ProfileScanCard({ scan, openImage, openDetails, deleteScan }: { scan: S
     <div className="flex w-full items-center gap-2 rounded-2xl bg-cream p-2 text-sm transition hover:bg-sage">
       <button onClick={() => openDetails(scan)} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-1 text-left">
       {preview ? (
-        <span onClick={(event) => { event.stopPropagation(); openImage({ src: preview, title: scan.title }); }} className="shrink-0 overflow-hidden rounded-xl bg-white" role="button" tabIndex={-1} aria-label="Scan-Bild gross anzeigen">
+        <span onClick={(event) => { event.stopPropagation(); openImage({ src: preview, title: scan.title }); }} className="shrink-0 overflow-hidden rounded-xl bg-white" role="button" tabIndex={-1} aria-label="Scan-Bild groß anzeigen">
           <img src={preview} alt="" className="size-12 object-cover" />
         </span>
       ) : (
@@ -1995,7 +2628,7 @@ function ProfileScanCard({ scan, openImage, openDetails, deleteScan }: { scan: S
         <span className="mt-1 block truncate text-xs text-ink/55">{scan.subtitle}</span>
       </div>
       </button>
-      <button onClick={() => deleteScan(scan.id)} className="grid size-9 shrink-0 place-items-center rounded-full bg-white text-ink/45 transition hover:bg-tomato hover:text-white" aria-label="Scan loeschen">
+      <button onClick={() => deleteScan(scan.id)} className="grid size-9 shrink-0 place-items-center rounded-full bg-white text-ink/45 transition hover:bg-tomato hover:text-white" aria-label="Scan löschen">
         <Trash2 size={15} />
       </button>
     </div>
@@ -2014,8 +2647,8 @@ function ScanDetailModal({ scan, close, openImage, deleteScan }: { scan: ScanHis
             <p className="mt-1 text-sm font-semibold text-ink/55">{scan.subtitle}</p>
           </div>
           <div className="flex shrink-0 gap-2">
-            <button onClick={() => deleteScan(scan.id)} className="grid size-10 place-items-center rounded-full bg-white text-tomato shadow-sm" aria-label="Scan loeschen"><Trash2 size={18} /></button>
-            <button onClick={close} className="grid size-10 place-items-center rounded-full bg-white text-ink/65 shadow-sm" aria-label="Details schliessen"><X size={18} /></button>
+            <button onClick={() => deleteScan(scan.id)} className="grid size-10 place-items-center rounded-full bg-white text-tomato shadow-sm" aria-label="Scan löschen"><Trash2 size={18} /></button>
+            <button onClick={close} className="grid size-10 place-items-center rounded-full bg-white text-ink/65 shadow-sm" aria-label="Details schließen"><X size={18} /></button>
           </div>
         </div>
         <div className="grid gap-5 p-5 md:grid-cols-[15rem_minmax(0,1fr)]">
@@ -2036,7 +2669,7 @@ function ScanDetailModal({ scan, close, openImage, deleteScan }: { scan: ScanHis
                   <p className="mt-1 break-all font-bold">{scan.barcode}</p>
                 </div>
                 <div className="rounded-2xl bg-cream p-4">
-                  <p className="text-xs font-black uppercase text-moss">Einschaetzung</p>
+                  <p className="text-xs font-black uppercase text-moss">Einschätzung</p>
                   <p className="mt-1 font-bold">{scan.product.status}</p>
                   <p className="mt-2 text-sm leading-6 text-ink/70">{scan.product.reason}</p>
                 </div>
@@ -2051,7 +2684,7 @@ function ScanDetailModal({ scan, close, openImage, deleteScan }: { scan: ScanHis
                 </div>
                 {scan.analysis.problematicIngredients.length > 0 && (
                   <div className="rounded-2xl bg-tomato/10 p-4">
-                    <p className="text-xs font-black uppercase text-tomato">Auffaellige Zutaten</p>
+                    <p className="text-xs font-black uppercase text-tomato">Auffällige Zutaten</p>
                     <p className="mt-2 text-sm font-semibold text-ink/75">{scan.analysis.problematicIngredients.join(", ")}</p>
                   </div>
                 )}
@@ -2093,14 +2726,64 @@ function GoogleLogo() {
   );
 }
 
+function getUserAvatarUrl(user: AuthUser | null) {
+  const metadata = user?.user_metadata || {};
+  const avatar = String(metadata.avatar_url || metadata.picture || "");
+  return avatar.startsWith("data:image/") ? "" : avatar;
+}
+
+function ProfileAvatar({ user, avatarUrl, size = "lg" }: { user: AuthUser | null; avatarUrl?: string; size?: "sm" | "lg" }) {
+  const src = avatarUrl || getUserAvatarUrl(user);
+  const name = user ? getUserDisplayName(user) : "Veggie Nutzer";
+  const sizeClass = size === "sm" ? "size-12 rounded-2xl text-lg" : "size-14 rounded-2xl text-xl sm:size-16 sm:text-2xl";
+  return (
+    <div className={`grid shrink-0 place-items-center overflow-hidden bg-moss font-black text-white shadow-sm ${sizeClass}`}>
+      {src ? <img src={src} alt={`${name} Profilbild`} className="h-full w-full object-cover" /> : name.slice(0, 1).toUpperCase()}
+    </div>
+  );
+}
+
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("home");
+  const [route, setRoute] = useState<AppRoute>(getRouteFromLocation);
+  const screen = route.screen;
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [premium, setPremium] = useState<PremiumState>(FREE_PREMIUM_STATE);
+  const [profileLoadedFor, setProfileLoadedFor] = useState("");
   const [guestId] = useState(readGuestId);
-  const [finds, setFinds] = useState<Find[]>(() => initialFinds.map((find) => ({ ...find, confirmations: 0, viewerConfirmed: false })));
+  const [dietaryPreferences, setDietaryPreferences] = useState<DietaryPreferences>(() => readDietaryPreferences());
+  const [favoriteProducts, setFavoriteProducts] = useState<FavoriteProduct[]>(() => readFavoriteProducts());
+  const [finds, setFinds] = useState<Find[]>(() => initialFinds.map((find) => ({ ...find, confirmations: 0, viewerConfirmed: false, likeCount: 0, dislikeCount: 0, viewerReaction: "" })));
+
+  const navigateToPath = (path: string, replace = false) => {
+    if (window.location.pathname !== path) {
+      if (replace) window.history.replaceState(null, "", path);
+      else window.history.pushState(null, "", path);
+    }
+    setRoute(getRouteFromLocation());
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const setScreen = (nextScreen: Screen) => {
+    navigateToPath(pathForScreen(nextScreen));
+  };
+
+  const openSpotRoute = (id: number) => {
+    navigateToPath(`/spots/${id}`);
+  };
+
+  const closeSpotRoute = () => {
+    navigateToPath(pathForScreen("map"), true);
+  };
+
+  useEffect(() => {
+    const handlePopState = () => setRoute(getRouteFromLocation());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   useEffect(() => {
     let active = true;
+    cleanupLargeAppStorage();
     void getCurrentUser().then((currentUser) => {
       if (active) setUser(currentUser);
     });
@@ -2110,6 +2793,77 @@ export default function App() {
       unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const metadata = user.user_metadata || {};
+    const authAvatar = String(metadata.avatar_url || metadata.picture || "");
+    if (!authAvatar.startsWith("data:image/")) return;
+    void clearProfileAvatarMetadata().then((cleanedUser) => {
+      if (cleanedUser) setUser(cleanedUser);
+    }).catch(console.warn);
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user) {
+      setPremium(FREE_PREMIUM_STATE);
+      setProfileLoadedFor("");
+      setDietaryPreferences(readDietaryPreferences());
+      setFavoriteProducts(readFavoriteProducts());
+      return;
+    }
+    setProfileLoadedFor("");
+    let active = true;
+    void fetchProfile(user.id).then((profile) => {
+      if (!active) return;
+      if (profile) {
+        setPremium({
+          isPremium: Boolean(profile.isPremium),
+          status: profile.premiumStatus || "free",
+          plan: profile.premiumPlan || "free",
+          premiumUntil: profile.premiumUntil || null
+        });
+        setDietaryPreferences({
+          diet: profile.dietMode || DEFAULT_DIETARY_PREFERENCES.diet,
+          warnings: Array.isArray(profile.warningIngredients) ? profile.warningIngredients : DEFAULT_DIETARY_PREFERENCES.warnings
+        });
+      }
+      setProfileLoadedFor(user.id);
+    }).catch((error) => {
+      if (!active) return;
+      console.warn(error);
+      setProfileLoadedFor(user.id);
+    });
+    void fetchProductFavorites(user.id).then((items) => {
+      if (active) setFavoriteProducts(items);
+    }).catch(console.warn);
+    return () => {
+      active = false;
+    };
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (user) return;
+    saveDietaryPreferences(dietaryPreferences);
+  }, [dietaryPreferences, user]);
+
+  useEffect(() => {
+    if (!user) return;
+    if (profileLoadedFor !== user.id) return;
+    void saveUserProfile({
+      id: user.id,
+      profileName: getUserDisplayName(user),
+      dietMode: dietaryPreferences.diet,
+      warningIngredients: dietaryPreferences.warnings,
+      publicSpots: readProfilePrivacy().publicSpots,
+      publicScans: readProfilePrivacy().publicScans
+    }).catch(console.warn);
+  }, [dietaryPreferences, profileLoadedFor, user?.id]);
+
+  useEffect(() => {
+    if (user) return;
+    saveFavoriteProducts(favoriteProducts);
+  }, [favoriteProducts, user]);
 
   useEffect(() => {
     let active = true;
@@ -2127,6 +2881,20 @@ export default function App() {
     };
   }, [user?.id, guestId]);
 
+  useEffect(() => {
+    if (!user) return;
+    const spotIds = readMySpotIds();
+    if (spotIds.length === 0) return;
+    void claimCommunitySpots(user.id, getUserDisplayName(user), spotIds).then((claimedSpots) => {
+      if (!claimedSpots.length) return;
+      const claimedFinds = claimedSpots as Find[];
+      setFinds((current) => {
+        const claimedById = new Map(claimedFinds.map((spot) => [spot.id, spot]));
+        return current.map((find) => claimedById.get(find.id) || find);
+      });
+    }).catch(console.warn);
+  }, [user?.id]);
+
   const addFind = async (find: CommunitySpotPayload) => {
     const saved = await saveCommunitySpot(find);
     saveMySpotId(saved.id);
@@ -2142,14 +2910,52 @@ export default function App() {
     }).catch(console.warn);
   };
 
+  const reactToFind = (id: number, reaction: SpotReaction) => {
+    const target = finds.find((find) => find.id === id);
+    if (!target) return;
+    const previousReaction = target.viewerReaction || "";
+    const nextReaction: SpotReaction | "" = previousReaction === reaction ? "" : reaction;
+
+    setFinds((current) => current.map((find) => find.id === id ? applyReactionToFind(find, nextReaction) : find));
+    void saveSpotReaction(id, nextReaction, user?.id || "", guestId).then((saved) => {
+      setFinds((current) => current.map((find) => find.id === id ? { ...saved, viewerConfirmed: find.viewerConfirmed } : find));
+    }).catch((error) => {
+      console.warn(error);
+      setFinds((current) => current.map((find) => find.id === id ? applyReactionToFind(find, previousReaction) : find));
+    });
+  };
+
+  const toggleFavoriteProduct = (product: ProductResult) => {
+    const key = product.barcode || product.name;
+    const existing = favoriteProducts.some((item) => item.barcode === key);
+    const favorite: FavoriteProduct = {
+      barcode: key,
+      name: product.name,
+      status: product.status,
+      imageUrl: product.imageUrl,
+      reason: product.reason,
+      createdAt: new Date().toISOString()
+    };
+    setFavoriteProducts((current) => {
+      if (current.some((item) => item.barcode === key)) return current.filter((item) => item.barcode !== key);
+      return [favorite, ...current].slice(0, 100);
+    });
+    if (!user) return;
+    if (existing) {
+      void deleteRemoteProductFavorite(user.id, key).catch(console.warn);
+    } else {
+      void saveProductFavorite({ userId: user.id, ...favorite }).catch(console.warn);
+    }
+  };
+
   return (
     <Shell screen={screen} setScreen={setScreen}>
-      {screen === "home" && <HomeScreen setScreen={setScreen} />}
-      {screen === "scanner" && <ScannerScreen user={user} />}
-      {screen === "map" && <MapScreen finds={finds} setScreen={setScreen} confirmFind={confirmFind} user={user} />}
+      {screen === "home" && <HomeScreen setScreen={setScreen} user={user} />}
+      {screen === "scanner" && <ScannerScreen user={user} premium={premium} setPremium={setPremium} dietaryPreferences={dietaryPreferences} favoriteProducts={favoriteProducts} toggleFavoriteProduct={toggleFavoriteProduct} />}
+      {screen === "map" && <MapScreen finds={finds} setScreen={setScreen} confirmFind={confirmFind} user={user} reactToFind={reactToFind} routeSpotId={route.spotId} openSpotRoute={openSpotRoute} closeSpotRoute={closeSpotRoute} />}
       {screen === "add" && <AddFindScreen addFind={addFind} setScreen={setScreen} user={user} />}
-      {screen === "pricing" && <PricingScreen />}
-      {screen === "profile" && <ProfileScreen setScreen={setScreen} user={user} setUser={setUser} finds={finds} />}
+      {screen === "pricing" && <PricingScreen premium={premium} user={user} setScreen={setScreen} />}
+      {screen === "profile" && <ProfileScreen setScreen={setScreen} user={user} setUser={setUser} finds={finds} premium={premium} setPremium={setPremium} dietaryPreferences={dietaryPreferences} setDietaryPreferences={setDietaryPreferences} favoriteProducts={favoriteProducts} />}
     </Shell>
   );
 }
@@ -2177,6 +2983,23 @@ function readGuestId() {
   }
 }
 
+function cleanupLargeAppStorage() {
+  try {
+    const keysToRemove: string[] = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key || !key.startsWith(SCAN_HISTORY_STORAGE_KEY)) continue;
+      const value = localStorage.getItem(key) || "";
+      if (key !== getScanHistoryStorageKey() || value.length > 220_000) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((key) => localStorage.removeItem(key));
+  } catch (error) {
+    console.warn("Local storage cleanup skipped", error);
+  }
+}
+
 function saveMySpotId(id: number) {
   const ids = Array.from(new Set([id, ...readMySpotIds()]));
   localStorage.setItem("veggie-navigator-my-spot-ids", JSON.stringify(ids));
@@ -2199,6 +3022,52 @@ function saveProfilePrivacy(privacy: ProfilePrivacy) {
   localStorage.setItem(PROFILE_PRIVACY_STORAGE_KEY, JSON.stringify(privacy));
 }
 
+function getUserScopedStorageKey(baseKey: string, userId?: string) {
+  return userId ? `${baseKey}-${userId}` : `${baseKey}-guest`;
+}
+
+function readDietaryPreferences(userId?: string): DietaryPreferences {
+  try {
+    const value = localStorage.getItem(getUserScopedStorageKey(DIETARY_PREFERENCES_STORAGE_KEY, userId));
+    const parsed = value ? JSON.parse(value) : null;
+    if (!parsed || typeof parsed !== "object") return DEFAULT_DIETARY_PREFERENCES;
+    const diet = ["vegan", "vegetarisch", "flexitarisch"].includes(parsed.diet) ? parsed.diet : DEFAULT_DIETARY_PREFERENCES.diet;
+    const warnings = Array.isArray(parsed.warnings) ? parsed.warnings.filter((item: unknown) => typeof item === "string") : DEFAULT_DIETARY_PREFERENCES.warnings;
+    return { diet, warnings };
+  } catch {
+    return DEFAULT_DIETARY_PREFERENCES;
+  }
+}
+
+function saveDietaryPreferences(preferences: DietaryPreferences, userId?: string) {
+  localStorage.setItem(getUserScopedStorageKey(DIETARY_PREFERENCES_STORAGE_KEY, userId), JSON.stringify(preferences));
+}
+
+function readFavoriteProducts(userId?: string): FavoriteProduct[] {
+  try {
+    const value = localStorage.getItem(getUserScopedStorageKey(PRODUCT_FAVORITES_STORAGE_KEY, userId));
+    const items = value ? JSON.parse(value) : [];
+    return Array.isArray(items) ? items.filter(isFavoriteProductItem).slice(0, 100) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveFavoriteProducts(items: FavoriteProduct[], userId?: string) {
+  localStorage.setItem(getUserScopedStorageKey(PRODUCT_FAVORITES_STORAGE_KEY, userId), JSON.stringify(items.slice(0, 100)));
+}
+
+function isFavoriteProductItem(item: unknown): item is FavoriteProduct {
+  if (!item || typeof item !== "object") return false;
+  const value = item as Partial<FavoriteProduct>;
+  return typeof value.barcode === "string" && typeof value.name === "string" && typeof value.createdAt === "string";
+}
+
+function isFavoriteProduct(product: ProductResult, favorites: FavoriteProduct[]) {
+  const key = product.barcode || product.name;
+  return favorites.some((item) => item.barcode === key);
+}
+
 function readSpotComments(spotId: number): SpotComment[] {
   try {
     const value = localStorage.getItem(`veggie-navigator-spot-comments-${spotId}`);
@@ -2213,10 +3082,56 @@ function saveSpotComments(spotId: number, comments: SpotComment[]) {
   localStorage.setItem(`veggie-navigator-spot-comments-${spotId}`, JSON.stringify(comments));
 }
 
+function applyReactionToFind(find: Find, nextReaction: SpotReaction | ""): Find {
+  const previousReaction = find.viewerReaction || "";
+  let likeCount = find.likeCount ?? 0;
+  let dislikeCount = find.dislikeCount ?? 0;
+  if (previousReaction === "like") likeCount = Math.max(0, likeCount - 1);
+  if (previousReaction === "dislike") dislikeCount = Math.max(0, dislikeCount - 1);
+  if (nextReaction === "like") likeCount += 1;
+  if (nextReaction === "dislike") dislikeCount += 1;
+  return { ...find, likeCount, dislikeCount, viewerReaction: nextReaction };
+}
+
 function isSpotComment(comment: unknown): comment is SpotComment {
   if (!comment || typeof comment !== "object") return false;
   const value = comment as Partial<SpotComment>;
   return typeof value.id === "number" && typeof value.author === "string" && typeof value.text === "string" && typeof value.createdAt === "string";
+}
+
+function buildCommentThreads(comments: SpotComment[]) {
+  const repliesByParent = new Map<number, SpotComment[]>();
+  const parents: SpotComment[] = [];
+
+  comments.forEach((comment) => {
+    if (comment.parentId) {
+      repliesByParent.set(comment.parentId, [...(repliesByParent.get(comment.parentId) || []), comment]);
+    } else {
+      parents.push(comment);
+    }
+  });
+
+  const byNewest = (a: SpotComment, b: SpotComment) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  const byOldest = (a: SpotComment, b: SpotComment) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  return parents.sort(byNewest).map((comment) => ({
+    comment,
+    replies: (repliesByParent.get(comment.id) || []).sort(byOldest)
+  }));
+}
+
+function removeCommentWithReplies(comments: SpotComment[], id: number) {
+  const removeIds = new Set<number>([id]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    comments.forEach((comment) => {
+      if (comment.parentId && removeIds.has(comment.parentId) && !removeIds.has(comment.id)) {
+        removeIds.add(comment.id);
+        changed = true;
+      }
+    });
+  }
+  return comments.filter((comment) => !removeIds.has(comment.id));
 }
 
 function formatCommentDate(value: string) {

@@ -1,5 +1,13 @@
 {
   "framework": "vite",
   "buildCommand": "npm run build",
-  "outputDirectory": "dist"
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/scanner", "destination": "/index.html" },
+    { "source": "/karte", "destination": "/index.html" },
+    { "source": "/hinzufuegen", "destination": "/index.html" },
+    { "source": "/premium", "destination": "/index.html" },
+    { "source": "/profil", "destination": "/index.html" },
+    { "source": "/spots/:id", "destination": "/index.html" }
+  ]
 }
