@@ -2,7 +2,7 @@ import { consumeScanQuota } from "../lib/scan-limits.js";
 import { getAuthenticatedUser } from "../lib/request-auth.js";
 
 export const config = {
-  maxDuration: 120,
+  maxDuration: 55,
 };
 
 const menuExtractionFormat = {
@@ -138,43 +138,16 @@ export default async function handler(req, res) {
     }
 
     if (isMenu) {
-      const extractionPrompt = [
-        "Lies ausschliesslich die sichtbare Speisekarte in allen Bildern und extrahiere eine vollständige Masterliste der Gerichte.",
-        "Arbeite jede Seite systematisch von oben links nach unten rechts ab. Prüfe anschliessend ein zweites Mal, ob zwischen dem ersten und letzten Gericht eine Zeile ausgelassen wurde.",
+      const menuPrompt = [
+        "Analysiere die sichtbare Speisekarte in einem einzigen Durchgang.",
+        "Bilde zuerst intern eine vollständige Masterliste aller Gerichte und bewerte danach exakt diese Liste. Ein erkanntes Gericht darf bei Bewertung oder Übersetzung nicht verschwinden.",
+        "Arbeite jede Seite systematisch von oben links nach unten rechts ab und prüfe vor der Ausgabe, ob zwischen dem ersten und letzten Gericht eine Zeile ausgelassen wurde.",
         "Ein Gericht ist ein einzeln bestellbarer Eintrag. Kategorien, Überschriften, Preise, Zutatenoptionen und Beilagen ohne eigenen bestellbaren Eintrag sind keine Gerichte.",
         "Fasse mehrere Seiten zusammen. Gib ein Gericht nur einmal aus, wenn derselbe Name mehrfach erscheint.",
-        "Erfinde nichts und bewerte noch nichts. Übernimm Namen exakt in der Menüsprache; behalte vorhandene Nummern bei.",
-        "description enthält nur die beim Gericht sichtbar gedruckte Beschreibung. Ist keine vorhanden, verwende einen leeren String.",
+        "Erfinde nichts. Übernimm Namen exakt in der Menüsprache und behalte vorhandene Nummern bei.",
+        "description erklärt die sichtbare Beschreibung kurz auf Deutsch. Ist keine vorhanden, verwende einen leeren String.",
         "language ist der hauptsächliche ISO-639-1-Sprachcode der Karte, zum Beispiel de, en, it, es oder fr.",
-      ].join("\n");
-      const extractionData = await requestOpenAI({
-        format: menuExtractionFormat,
-        maxOutputTokens: 3000,
-        content: [
-          { type: "input_text", text: extractionPrompt },
-          ...images.map((image) => ({
-            type: "input_image",
-            image_url: image,
-            detail: "high",
-          })),
-        ],
-      });
-      const extractedMenu = validateExtractedMenu(
-        safeJson(extractResponseText(extractionData)),
-      );
-      if (extractedMenu.dishes.length === 0)
-        return res.status(422).json({
-          error:
-            "Auf den Bildern konnten keine einzelnen Gerichte sicher gelesen werden. Bitte fotografiere die Speisekarte näher, gerade und mit gutem Licht.",
-          quota,
-        });
-
-      const assessmentPrompt = [
-        "Bewerte exakt die folgende bereits extrahierte Masterliste. Lass kein Gericht weg, füge keines hinzu und ändere die Namen nicht.",
-        `Die Masterliste enthält exakt ${extractedMenu.dishes.length} Gerichte. Die Ausgabe muss ebenfalls exakt ${extractedMenu.dishes.length} Gerichte in derselben Reihenfolge enthalten.`,
-        `Masterliste: ${JSON.stringify(extractedMenu)}`,
         `Die Sprache des Users ist: ${userLanguage === "de" ? "Deutsch" : String(userLanguage).slice(0, 20)}. Alle Erklärungen für den User müssen auf Deutsch sein. Das gilt insbesondere für description, reason, problematicIngredients, adaptationSuggestion und generalNotes.`,
-        `Gib language unverändert als ${extractedMenu.language} aus.`,
         `Das Ernährungsprofil ist: ${diet === "vegetarian" ? "vegetarisch" : diet === "flexitarian" ? "flexitarisch mit Fokus auf pflanzliche Optionen" : "vegan"}.`,
         `Zusätzlich zu vermeiden: ${
           Array.isArray(exclusions) && exclusions.length
@@ -200,20 +173,33 @@ export default async function handler(req, res) {
         "Setze questionForRestaurant immer auf denselben Text wie questionForRestaurantLocal, damit die Frage direkt im Restaurant gezeigt werden kann.",
         "Wenn die Speisekarte nicht Deutsch ist, setze questionForRestaurantLocal auf eine natürliche Übersetzung der deutschen Frage in die Sprache der Speisekarte. Setze questionForRestaurant auf dieselbe fremdsprachige Frage, damit sie im Restaurant direkt vorgezeigt werden kann.",
         "Markiere ein Gericht nur dann als vegan, wenn die sichtbaren Angaben eindeutig sind. Nutze sonst unclear.",
-        "Wenn die Angaben bei einem Gericht nicht reichen, behalte das Gericht trotzdem und verwende unclear. Ein unsicheres Gericht darf niemals aus der Liste verschwinden.",
+        "Wenn Angaben nicht reichen, behalte das Gericht und verwende unclear. Ein unsicheres Gericht darf niemals aus der Liste verschwinden.",
       ].join("\n");
-      const assessmentData = await requestOpenAI({
+      const menuData = await requestOpenAI({
         format: menuResponseFormat,
-        maxOutputTokens: 5000,
-        content: [{ type: "input_text", text: assessmentPrompt }],
+        maxOutputTokens: 4500,
+        timeoutMs: 48000,
+        content: [
+          { type: "input_text", text: menuPrompt },
+          ...images.map((image) => ({
+            type: "input_image",
+            image_url: image,
+            detail: "high",
+          })),
+        ],
       });
-      const assessedMenu = validateMenuResult(
-        safeJson(extractResponseText(assessmentData)),
+      const result = validateMenuResult(
+        safeJson(extractResponseText(menuData)),
       );
-      const result = reconcileMenuAssessment(extractedMenu, assessedMenu);
+      if (result.dishes.length === 0)
+        return res.status(422).json({
+          error:
+            "Auf den Bildern konnten innerhalb von 60 Sekunden keine Gerichte sicher gelesen werden. Bitte nutze weniger Seiten oder ein schärferes Foto.",
+          quota,
+        });
       return res.status(200).json({
         result,
-        source: "OpenAI Responses API (Extraktion + Bewertung)",
+        source: "OpenAI Responses API (Schnellanalyse)",
         quota,
       });
     }
@@ -246,17 +232,26 @@ export default async function handler(req, res) {
       quota,
     });
   } catch (error) {
-    return res.status(error?.status || 500).json({
-      error:
-        error instanceof Error ? error.message : "KI-Analyse nicht erreichbar.",
+    const timedOut = ["AbortError", "TimeoutError"].includes(error?.name);
+    return res.status(error?.status || (timedOut ? 504 : 500)).json({
+      error: timedOut
+        ? "Die Speisekartenanalyse hat das 60-Sekunden-Limit erreicht. Bitte nutze weniger Seiten oder ein schärferes Foto."
+        : error instanceof Error
+          ? error.message
+          : "KI-Analyse nicht erreichbar.",
     });
   }
 }
 
-async function requestOpenAI({ content, format, maxOutputTokens }) {
+async function requestOpenAI({
+  content,
+  format,
+  maxOutputTokens,
+  timeoutMs = 48000,
+}) {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       "Content-Type": "application/json",

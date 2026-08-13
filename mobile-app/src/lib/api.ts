@@ -101,6 +101,7 @@ export async function analyzeImage(
   referenceCode = "",
   exclusions: string[] = [],
   userLanguage = "de",
+  timeoutMs?: number,
 ): Promise<ProductResult | MenuAnalysis> {
   const raw = await request<{ result: Record<string, unknown> }>(
     "/api/analyze-ingredients",
@@ -131,7 +132,7 @@ export async function analyzeImage(
               userLanguage,
             },
       ),
-      timeoutMs: mode === "menu" ? 125_000 : 60_000,
+      timeoutMs: timeoutMs ?? (mode === "menu" ? 50_000 : 45_000),
     },
   );
   return mode === "ingredients"

@@ -35,6 +35,27 @@ import type { MenuAnalysis, ProductResult } from "@/types";
 
 type SelectedImage = { uri: string; base64: string };
 const MAX_MENU_PAGES = 8;
+const MAX_SCAN_DURATION_MS = 58_000;
+
+function rejectAfter<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+) {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 export default function Photo() {
   const params = useLocalSearchParams<{
@@ -60,7 +81,7 @@ export default function Photo() {
   const prepare = async (assets: ImagePicker.ImagePickerAsset[]) =>
     Promise.all(
       assets.map(async (asset) => {
-        const maximumWidth = mode === "menu" ? 1280 : 1400;
+        const maximumWidth = mode === "menu" ? 1200 : 1400;
         const targetWidth = Math.min(asset.width || maximumWidth, maximumWidth);
         const edited = await ImageManipulator.manipulateAsync(
           asset.uri,
@@ -68,7 +89,7 @@ export default function Photo() {
             ? []
             : [{ resize: { width: targetWidth } }],
           {
-            compress: mode === "menu" ? 0.65 : 0.7,
+            compress: mode === "menu" ? 0.62 : 0.7,
             format: ImageManipulator.SaveFormat.JPEG,
             base64: true,
           },
@@ -117,6 +138,7 @@ export default function Photo() {
 
   const analyze = async () => {
     if (!images.length) return;
+    const scanStartedAt = Date.now();
     setLoading(true);
     setAnalysisStage("upload");
     setError("");
@@ -128,7 +150,7 @@ export default function Photo() {
         throw new Error(
           "Deine Sitzung ist abgelaufen. Bitte melde dich erneut an.",
         );
-      const uploads = await Promise.all(
+      const uploadPromise = Promise.all(
         images.map((image) =>
           uploadTemporaryAnalysisImage(
             user,
@@ -137,10 +159,30 @@ export default function Photo() {
           ),
         ),
       );
+      let uploads: Awaited<typeof uploadPromise>;
+      try {
+        uploads = await rejectAfter(
+          uploadPromise,
+          12_000,
+          "Das Hochladen der Bilder dauert zu lange. Bitte prüfe deine Verbindung oder wähle weniger Seiten.",
+        );
+      } catch (uploadError) {
+        void uploadPromise
+          .then((lateUploads) =>
+            Promise.allSettled(lateUploads.map((item) => item.remove())),
+          )
+          .catch(() => undefined);
+        throw uploadError;
+      }
       temporary.push(...uploads);
       setAnalysisStage("read");
       const firstUpload = uploads[0];
       if (!firstUpload) throw new Error("Kein Bild konnte hochgeladen werden.");
+      const remainingMs = MAX_SCAN_DURATION_MS - (Date.now() - scanStartedAt);
+      if (remainingMs < 5_000)
+        throw new Error(
+          "Die Bildübertragung hat zu lange gedauert. Bitte versuche es mit weniger Seiten erneut.",
+        );
       const result = await analyzeImage(
         mode === "menu" ? uploads.map((item) => item.url) : firstUpload.url,
         mode,
@@ -149,6 +191,7 @@ export default function Photo() {
         params.barcode,
         profile.exclusions,
         profile.language,
+        remainingMs,
       );
       if (mode === "ingredients") {
         setAnalysisStage("finish");
@@ -165,7 +208,7 @@ export default function Photo() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Analyse fehlgeschlagen.");
     } finally {
-      await Promise.allSettled(temporary.map((item) => item.remove()));
+      void Promise.allSettled(temporary.map((item) => item.remove()));
       setLoading(false);
     }
   };
@@ -251,7 +294,7 @@ export default function Photo() {
               </Text>
               <Text style={s.progressCopy}>
                 {analysisStage === "read"
-                  ? "Die KI liest die Karte, gleicht dein Profil ab und erstellt Restaurantfragen."
+                  ? "Die KI liest und bewertet die Karte in einem Durchgang. Spätestens nach 60 Sekunden erhältst du ein Ergebnis."
                   : "Bitte lass die App kurz geöffnet."}
               </Text>
             </View>
