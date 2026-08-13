@@ -1,4 +1,5 @@
 import { reactToCommunitySpot } from "../../lib/community-spots.js";
+import { getAuthenticatedUser } from "../../lib/request-auth.js";
 
 export default async function handler(req, res) {
   setCors(req, res);
@@ -7,19 +8,19 @@ export default async function handler(req, res) {
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    const user = await getAuthenticatedUser(req, { required: true });
     if (!body.id) return res.status(400).json({ error: "id missing" });
-    if (!body.userId && !body.guestId) return res.status(400).json({ error: "Reaktion nicht zuordenbar." });
-    const spot = await reactToCommunitySpot(body.id, body.reaction, body.userId, body.guestId);
+    const spot = await reactToCommunitySpot(body.id, body.reaction, user.id);
     return res.status(200).json({ item: spot });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Reaktion konnte nicht gespeichert werden.";
-    return res.status(500).json({ error: message });
+    return res.status(error?.status || 500).json({ error: message });
   }
 }
 
 function setCors(req, res) {
   const origin = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Veggie-Client, X-Request-ID");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
 }

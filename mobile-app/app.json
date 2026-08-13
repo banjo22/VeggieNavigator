@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "Veggie Navigator",
+    "slug": "veggie-navigator",
+    "scheme": "veggienavigator",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Veggie Navigator benötigt die Kamera zum Scannen von Barcodes und Zutatenlisten."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Veggie Navigator benötigt Zugriff auf ausgewählte Fotos, um Zutatenlisten und Speisekarten zu prüfen."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Veggie Navigator verwendet deinen Standort, um Community-Spots in deiner Nähe anzuzeigen und neue Spots korrekt zu platzieren."
+        }
+      ],
+      ["expo-secure-store", { "configureAndroidBackup": true }]
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.veggienavigator.mobile"
+    },
+    "android": {
+      "package": "app.veggienavigator.mobile",
+      "permissions": [
+        "CAMERA",
+        "INTERNET",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "experiments": { "typedRoutes": true }
+  }
+}

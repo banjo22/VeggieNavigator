@@ -1,5 +1,6 @@
 import { fetchProductByBarcode } from "../lib/open-food-facts.js";
 import { consumeScanQuota } from "../lib/scan-limits.js";
+import { getAuthenticatedUser } from "../lib/request-auth.js";
 
 export default async function handler(req, res) {
   setCors(req, res);
@@ -10,6 +11,7 @@ export default async function handler(req, res) {
   if (!barcode) return res.status(400).json({ error: "barcode missing" });
 
   try {
+    await getAuthenticatedUser(req, { required: true });
     const quota = await consumeScanQuota(req);
     const product = await fetchProductByBarcode(barcode);
     return res.status(200).json({ product, quota });
