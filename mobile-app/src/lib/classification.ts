@@ -10,6 +10,15 @@ export function personalizeStatus(
   return status;
 }
 
+export function isMenuDishFitting(status: Suitability, diet: DietMode) {
+  if (diet === "vegan") return status === "vegan";
+  return status === "vegan" || status === "vegetarian";
+}
+
+export function isMenuDishRecommended(status: Suitability, diet: DietMode) {
+  return isMenuDishFitting(status, diet) || status === "possibly_adaptable";
+}
+
 export function normalizeProduct(
   raw: Record<string, unknown>,
   diet: DietMode,

@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   validateIngredientResult,
+  validateExtractedMenu,
   validateMenuResult,
+  reconcileMenuAssessment,
 } from "../api/analyze-ingredients.js";
 test("invalid ingredient model output fails closed", () => {
   const result = validateIngredientResult({
@@ -50,7 +52,7 @@ test("adaptable menu dishes retain concrete restaurant guidance", () => {
         adaptationSuggestion: "Ohne Parmesan bestellen.",
         questionForRestaurant: "Ist Parmesan oder Butter enthalten?",
         questionForRestaurantGerman: "Ist Parmesan oder Butter enthalten?",
-        questionForRestaurantLocal: "",
+        questionForRestaurantLocal: "Ist Parmesan oder Butter enthalten?",
         questionForRestaurantEnglish: "Does this contain Parmesan or butter?",
       },
     ],
@@ -60,7 +62,7 @@ test("adaptable menu dishes retain concrete restaurant guidance", () => {
   assert.equal(result.dishes[0].classification, "possibly_adaptable");
   assert.match(result.dishes[0].questionForRestaurant, /Parmesan/);
   assert.match(result.dishes[0].questionForRestaurantGerman, /Parmesan/);
-  assert.equal(result.dishes[0].questionForRestaurantLocal, "");
+  assert.match(result.dishes[0].questionForRestaurantLocal, /Parmesan/);
   assert.match(result.dishes[0].questionForRestaurantEnglish, /Does/);
 });
 
@@ -87,4 +89,49 @@ test("foreign menu questions retain German and local versions", () => {
   assert.match(result.dishes[0].questionForRestaurantGerman, /Enthält/);
   assert.match(result.dishes[0].questionForRestaurantLocal, /Contiene/);
   assert.match(result.dishes[0].questionForRestaurantEnglish, /Does/);
+});
+
+test("duplicate menu dishes are counted only once", () => {
+  const result = validateMenuResult({
+    language: "it",
+    dishes: [
+      { name: "12. Pasta al Pomodoro", classification: "vegan" },
+      { name: "Pasta al pomodoro", classification: "vegan" },
+    ],
+    generalNotes: [],
+  });
+
+  assert.equal(result.dishes.length, 1);
+});
+
+test("menu assessment cannot change the extracted dish count", () => {
+  const extracted = validateExtractedMenu({
+    language: "it",
+    dishes: [
+      { name: "Pasta al pomodoro", description: "Pomodoro" },
+      { name: "Risotto ai funghi", description: "Funghi" },
+      { name: "Insalata verde", description: "Insalata" },
+    ],
+  });
+  const assessed = validateMenuResult({
+    language: "it",
+    dishes: [
+      {
+        name: "Pasta al pomodoro",
+        classification: "vegan",
+        reason: "Keine tierischen Zutaten angegeben.",
+      },
+      {
+        name: "Risotto ai funghi",
+        classification: "unclear",
+        reason: "Brühe und Butter sind unklar.",
+      },
+    ],
+    generalNotes: [],
+  });
+
+  const reconciled = reconcileMenuAssessment(extracted, assessed);
+  assert.equal(reconciled.dishes.length, 3);
+  assert.equal(reconciled.dishes[2].name, "Insalata verde");
+  assert.equal(reconciled.dishes[2].classification, "unclear");
 });

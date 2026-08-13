@@ -16,6 +16,7 @@ import {
   StatusBadge,
 } from "@/components/ui";
 import { useAppStore } from "@/store/AppStore";
+import { isMenuDishFitting, isMenuDishRecommended } from "@/lib/classification";
 import { colors, radius, space, type } from "@/theme";
 import { useState } from "react";
 
@@ -34,6 +35,33 @@ type QuestionVariant = {
   text: string;
 };
 
+const languageNames: Record<string, string> = {
+  de: "Deutsch",
+  german: "Deutsch",
+  en: "Englisch",
+  english: "Englisch",
+  it: "Italienisch",
+  italian: "Italienisch",
+  es: "Spanisch",
+  spanish: "Spanisch",
+  fr: "Französisch",
+  french: "Französisch",
+  pt: "Portugiesisch",
+  nl: "Niederländisch",
+  tr: "Türkisch",
+  el: "Griechisch",
+  greek: "Griechisch",
+  ja: "Japanisch",
+  zh: "Chinesisch",
+  th: "Thailändisch",
+  vi: "Vietnamesisch",
+};
+
+function getMenuLanguageLabel(language: string) {
+  const normalized = language.toLowerCase().split(/[-_]/)[0] ?? "";
+  return languageNames[normalized] || "Menüsprache";
+}
+
 function RestaurantQuestion({
   german,
   local,
@@ -44,21 +72,26 @@ function RestaurantQuestion({
   const [selectedLanguage, setSelectedLanguage] = useState<QuestionLanguage>(
     local ? "local" : german ? "de" : "en",
   );
-  const variants: QuestionVariant[] = [];
-
-  if (german) variants.push({ key: "de", label: "Deutsch", text: german });
-  if (local && local !== german) {
-    const isEnglishMenu = menuLanguage.startsWith("en");
-    variants.push({
-      key: "local",
-      label:
-        isEnglishMenu || local === english ? "Englisch · Menü" : "Menüsprache",
-      text: local,
-    });
-  }
-  if (english && english !== german && english !== local) {
-    variants.push({ key: "en", label: "Englisch", text: english });
-  }
+  const menuLanguageText =
+    local ||
+    (menuLanguage.startsWith("de") ? german : undefined) ||
+    (menuLanguage.startsWith("en") ? english : undefined) ||
+    fallback;
+  const variants: QuestionVariant[] = [
+    ...(german ? [{ key: "de" as const, label: "Deutsch", text: german }] : []),
+    ...(menuLanguageText
+      ? [
+          {
+            key: "local" as const,
+            label: `Menü: ${getMenuLanguageLabel(menuLanguage)}`,
+            text: menuLanguageText,
+          },
+        ]
+      : []),
+    ...(english
+      ? [{ key: "en" as const, label: "Englisch", text: english }]
+      : []),
+  ];
   if (variants.length === 0 && fallback) {
     variants.push({ key: "local", label: "Restaurantfrage", text: fallback });
   }
@@ -111,7 +144,10 @@ function RestaurantQuestion({
 
 export default function MenuResult() {
   const router = useRouter();
-  const { menuAnalysis } = useAppStore();
+  const { menuAnalysis, profile } = useAppStore();
+  const [dishFilter, setDishFilter] = useState<
+    "recommended" | "adaptable" | "all"
+  >("recommended");
   if (!menuAnalysis) {
     return (
       <AppScreen>
@@ -137,24 +173,38 @@ export default function MenuResult() {
   const isGermanMenu = (menuAnalysis.language || "de")
     .toLowerCase()
     .startsWith("de");
+  const fittingCount = menuAnalysis.dishes.filter((dish) =>
+    isMenuDishFitting(dish.classification, profile.dietMode),
+  ).length;
+  const adaptableCount = menuAnalysis.dishes.filter(
+    (dish) => dish.classification === "possibly_adaptable",
+  ).length;
+  const visibleDishes = menuAnalysis.dishes.filter((dish) => {
+    if (dishFilter === "all") return true;
+    if (dishFilter === "adaptable")
+      return dish.classification === "possibly_adaptable";
+    return isMenuDishRecommended(dish.classification, profile.dietMode);
+  });
   const shareQuestions = async () => {
     const questions = adaptable
       .map((dish) => {
         const german =
           dish.questionForRestaurantGerman ||
           (isGermanMenu ? dish.questionForRestaurant : "");
+        const english = dish.questionForRestaurantEnglish || "";
         const local =
           dish.questionForRestaurantLocal ||
-          (!isGermanMenu ? dish.questionForRestaurant : "");
-        const english = dish.questionForRestaurantEnglish || "";
-        const seen = new Set<string>();
+          (isGermanMenu
+            ? german
+            : (menuAnalysis.language || "").toLowerCase().startsWith("en")
+              ? english || dish.questionForRestaurant || ""
+              : dish.questionForRestaurant || "");
         const translations = [
           { label: "Deutsch", text: german },
           { label: "Menüsprache", text: local },
           { label: "Englisch", text: english },
         ].flatMap(({ label, text }) => {
-          if (!text || seen.has(text)) return [];
-          seen.add(text);
+          if (!text) return [];
           return [`${label}: ${text}`];
         });
         return translations.length
@@ -177,8 +227,7 @@ export default function MenuResult() {
             {menuAnalysis.dishes.length} Gerichte erkannt
           </Text>
           <Text style={s.copy}>
-            Alle aufgenommenen Seiten wurden zusammengeführt und doppelte
-            Gerichte vermieden.
+            {fittingCount} passend · {adaptableCount} anpassbar
           </Text>
         </View>
       </View>
@@ -189,37 +238,72 @@ export default function MenuResult() {
         </View>
       ) : null}
       <SectionTitle>Gerichte</SectionTitle>
-      {menuAnalysis.dishes.map((dish, index) => (
-        <View style={s.card} key={`${dish.name}-${index}`}>
-          <StatusBadge status={dish.classification} />
-          <Text style={s.cardTitle}>{dish.name}</Text>
-          {dish.description ? (
-            <Text style={s.copy}>{dish.description}</Text>
-          ) : null}
-          <Text style={s.copy}>{dish.reason}</Text>
-          {dish.problematicIngredients?.length ? (
-            <Text style={s.warning}>
-              Achten auf: {dish.problematicIngredients.join(", ")}
-            </Text>
-          ) : null}
-          {dish.adaptationSuggestion ? (
-            <Text style={s.tip}>{dish.adaptationSuggestion}</Text>
-          ) : null}
-          <RestaurantQuestion
-            german={
-              dish.questionForRestaurantGerman ||
-              (isGermanMenu ? dish.questionForRestaurant : undefined)
-            }
-            local={
-              dish.questionForRestaurantLocal ||
-              (!isGermanMenu ? dish.questionForRestaurant : undefined)
-            }
-            english={dish.questionForRestaurantEnglish}
-            fallback={dish.questionForRestaurant}
-            menuLanguage={(menuAnalysis.language || "de").toLowerCase()}
-          />
+      <View style={s.filterBar}>
+        {[
+          ["recommended", `Empfohlen (${fittingCount + adaptableCount})`],
+          ["adaptable", `Anpassbar (${adaptableCount})`],
+          ["all", `Alle (${menuAnalysis.dishes.length})`],
+        ].map(([value, label]) => {
+          const active = dishFilter === value;
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              key={value}
+              onPress={() =>
+                setDishFilter(value as "recommended" | "adaptable" | "all")
+              }
+              style={[s.filterButton, active ? s.filterButtonActive : null]}
+            >
+              <Text style={[s.filterText, active ? s.filterTextActive : null]}>
+                {label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      {visibleDishes.length ? (
+        visibleDishes.map((dish, index) => (
+          <View style={s.card} key={`${dish.name}-${index}`}>
+            <StatusBadge status={dish.classification} />
+            <Text style={s.cardTitle}>{dish.name}</Text>
+            {dish.description ? (
+              <Text style={s.copy}>{dish.description}</Text>
+            ) : null}
+            <Text style={s.copy}>{dish.reason}</Text>
+            {dish.problematicIngredients?.length ? (
+              <Text style={s.warning}>
+                Achten auf: {dish.problematicIngredients.join(", ")}
+              </Text>
+            ) : null}
+            <RestaurantQuestion
+              german={
+                dish.questionForRestaurantGerman ||
+                (isGermanMenu ? dish.questionForRestaurant : undefined)
+              }
+              local={
+                dish.questionForRestaurantLocal ||
+                (isGermanMenu
+                  ? dish.questionForRestaurantGerman ||
+                    dish.questionForRestaurant
+                  : dish.questionForRestaurant)
+              }
+              english={dish.questionForRestaurantEnglish}
+              fallback={dish.questionForRestaurant}
+              menuLanguage={(menuAnalysis.language || "de").toLowerCase()}
+            />
+          </View>
+        ))
+      ) : (
+        <View style={s.emptyFilter}>
+          <Text style={s.emptyFilterTitle}>
+            Keine Gerichte in dieser Auswahl
+          </Text>
+          <Text style={s.copy}>
+            Wechsle zu „Alle“, um die vollständige Speisekarte zu sehen.
+          </Text>
         </View>
-      ))}
+      )}
       <SecondaryButton
         title="Fragen fürs Restaurant teilen"
         onPress={shareQuestions}
@@ -271,14 +355,34 @@ const s = StyleSheet.create({
     borderRadius: radius.lg,
   },
   cardTitle: { fontSize: type.card, fontWeight: "800", color: colors.text },
-  warning: { color: colors.danger, fontWeight: "700", lineHeight: 21 },
-  tip: {
-    padding: space.md,
-    borderRadius: radius.md,
+  filterBar: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
+  filterButton: {
+    paddingHorizontal: space.md,
+    paddingVertical: 9,
+    borderRadius: radius.round,
     backgroundColor: colors.primarySoft,
-    color: colors.primary,
-    fontWeight: "700",
   },
+  filterButtonActive: { backgroundColor: colors.primary },
+  filterText: {
+    color: colors.primary,
+    fontSize: type.caption,
+    fontWeight: "800",
+  },
+  filterTextActive: { color: "#fff" },
+  emptyFilter: {
+    gap: space.xs,
+    padding: space.lg,
+    borderRadius: radius.lg,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyFilterTitle: {
+    color: colors.text,
+    fontSize: type.body,
+    fontWeight: "800",
+  },
+  warning: { color: colors.danger, fontWeight: "700", lineHeight: 21 },
   question: {
     flexDirection: "row",
     alignItems: "flex-start",

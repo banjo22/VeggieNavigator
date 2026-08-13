@@ -20,14 +20,17 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+type ApiRequestInit = RequestInit & { timeoutMs?: number };
+
+async function request<T>(path: string, init?: ApiRequestInit): Promise<T> {
   if (!baseUrl)
     throw new ApiError(
       "Backend-Adresse fehlt. Setze EXPO_PUBLIC_API_BASE_URL.",
       0,
     );
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const { timeoutMs = 30_000, ...fetchInit } = init ?? {};
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const requestId = createRequestId();
   const started = Date.now();
   try {
@@ -40,14 +43,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         method: init?.method ?? "GET",
       });
     const response = await fetch(`${baseUrl}${path}`, {
-      ...init,
-      signal: init?.signal ?? controller.signal,
+      ...fetchInit,
+      signal: fetchInit.signal ?? controller.signal,
       headers: {
         Accept: "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         "X-Request-ID": requestId,
         "X-Veggie-Client": "mobile",
-        ...init?.headers,
+        ...fetchInit.headers,
       },
     });
     const data = (await response.json().catch(() => null)) as T & {
@@ -128,6 +131,7 @@ export async function analyzeImage(
               userLanguage,
             },
       ),
+      timeoutMs: mode === "menu" ? 125_000 : 60_000,
     },
   );
   return mode === "ingredients"

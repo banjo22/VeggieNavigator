@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import {
   Barcode,
   Camera,
+  ChevronRight,
   Heart,
   History,
   Leaf,
@@ -18,36 +19,65 @@ import {
 import { useAppStore } from "@/store/AppStore";
 import { colors, radius, space, type } from "@/theme";
 const actions = [
-  { title: "Barcode scannen", icon: Barcode, href: "/scan?mode=barcode" },
+  {
+    title: "Barcode scannen",
+    description: "Schnellste Prüfung für verpackte Produkte",
+    icon: Barcode,
+    href: "/scan?mode=barcode",
+  },
   {
     title: "Zutaten fotografieren",
+    description: "Zutatenliste per Foto auswerten",
     icon: Camera,
     href: "/photo?mode=ingredients",
   },
-  { title: "Speisekarte prüfen", icon: Utensils, href: "/photo?mode=menu" },
-  { title: "Alternative suchen", icon: Search, href: "/(tabs)/discover" },
+  {
+    title: "Speisekarte prüfen",
+    description: "Passende und anpassbare Gerichte finden",
+    icon: Utensils,
+    href: "/photo?mode=menu",
+  },
+  {
+    title: "Entdecken",
+    description: "Lexikon, Reisemodus und Community-Spots",
+    icon: Search,
+    href: "/(tabs)/discover",
+  },
 ] as const;
 export default function Home() {
   const router = useRouter();
   const { profile, scans, favorites } = useAppStore();
+  const hour = new Date().getHours();
+  const greeting =
+    hour < 11 ? "Guten Morgen" : hour < 18 ? "Hallo" : "Guten Abend";
   return (
     <AppScreen>
       <View>
-        <Text style={s.title}>Guten Morgen, {profile.name}</Text>
+        <Text style={s.title}>
+          {greeting}, {profile.name}
+        </Text>
         <Text style={s.subtitle}>Was möchtest du prüfen?</Text>
       </View>
       <View style={s.grid}>
-        {actions.map(({ title, icon: Icon, href }) => (
+        {actions.map(({ title, description, icon: Icon, href }) => (
           <Pressable
             key={title}
-            style={s.action}
+            style={({ pressed }) => [
+              s.action,
+              pressed ? s.actionPressed : null,
+            ]}
             onPress={() => router.push(href)}
             accessibilityLabel={title}
+            accessibilityHint={description}
           >
-            <View style={s.icon}>
-              <Icon color={colors.primary} size={26} />
+            <View style={s.actionTop}>
+              <View style={s.icon}>
+                <Icon color={colors.primary} size={24} />
+              </View>
+              <ChevronRight color={colors.textMuted} size={20} />
             </View>
             <Text style={s.actionText}>{title}</Text>
+            <Text style={s.actionDescription}>{description}</Text>
           </Pressable>
         ))}
       </View>
@@ -106,13 +136,20 @@ const s = StyleSheet.create({
   grid: { flexDirection: "row", flexWrap: "wrap", gap: space.md },
   action: {
     width: "48%",
-    minHeight: 140,
+    minHeight: 166,
     padding: space.lg,
     borderRadius: radius.lg,
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
+    gap: space.sm,
+  },
+  actionPressed: { opacity: 0.78, transform: [{ scale: 0.99 }] },
+  actionTop: {
+    flexDirection: "row",
     justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: space.xs,
   },
   icon: {
     width: 48,
@@ -123,6 +160,11 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   actionText: { fontSize: type.body, fontWeight: "700", color: colors.text },
+  actionDescription: {
+    color: colors.textMuted,
+    fontSize: type.caption,
+    lineHeight: 18,
+  },
   link: { color: colors.primary, fontWeight: "700" },
   row: {
     flexDirection: "row",

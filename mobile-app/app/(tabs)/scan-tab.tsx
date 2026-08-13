@@ -1,9 +1,10 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import {
   Barcode,
   Camera,
+  ChevronRight,
   Image as ImageIcon,
   Utensils,
 } from "lucide-react-native";
@@ -33,18 +34,24 @@ export default function ScanTab() {
       <View style={s.row}>
         <Action
           icon={Camera}
-          title="Zutaten"
+          title="Zutaten fotografieren"
+          description="Für Verpackungen ohne lesbaren Barcode"
           onPress={() => router.push("/photo?mode=ingredients")}
         />
         <Action
           icon={Utensils}
-          title="Speisekarte"
+          title="Speisekarte prüfen"
+          description="Eine oder mehrere Seiten gemeinsam analysieren"
           onPress={() => router.push("/photo?mode=menu")}
         />
       </View>
       <SecondaryButton
-        title="Bild aus Galerie auswählen"
+        title="Zutatenbild aus Galerie"
         onPress={() => router.push("/photo?mode=ingredients&source=gallery")}
+      />
+      <SecondaryButton
+        title="Speisekartenbilder aus Galerie"
+        onPress={() => router.push("/photo?mode=menu&source=gallery")}
       />
     </AppScreen>
   );
@@ -52,18 +59,31 @@ export default function ScanTab() {
 function Action({
   icon: Icon,
   title,
+  description,
   onPress,
 }: {
   icon: typeof Camera;
   title: string;
+  description: string;
   onPress: () => void;
 }) {
   return (
-    <View style={s.action}>
-      <Icon color={colors.primary} />
-      <Text style={s.actionTitle}>{title}</Text>
-      <PrimaryButton title="Auswählen" onPress={onPress} />
-    </View>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={title}
+      accessibilityHint={description}
+      onPress={onPress}
+      style={({ pressed }) => [s.action, pressed ? s.actionPressed : null]}
+    >
+      <View style={s.actionIcon}>
+        <Icon color={colors.primary} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={s.actionTitle}>{title}</Text>
+        <Text style={s.actionCopy}>{description}</Text>
+      </View>
+      <ChevronRight color={colors.textMuted} />
+    </Pressable>
   );
 }
 const s = StyleSheet.create({
@@ -78,9 +98,10 @@ const s = StyleSheet.create({
   },
   heroTitle: { fontSize: type.section, fontWeight: "800", color: colors.text },
   center: { textAlign: "center", color: colors.textMuted, fontSize: type.body },
-  row: { flexDirection: "row", gap: space.md },
+  row: { gap: space.md },
   action: {
-    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
     padding: space.lg,
     gap: space.md,
     backgroundColor: colors.surface,
@@ -88,5 +109,20 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+  actionPressed: { opacity: 0.8 },
+  actionIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primarySoft,
+  },
   actionTitle: { fontSize: type.card, fontWeight: "700", color: colors.text },
+  actionCopy: {
+    color: colors.textMuted,
+    fontSize: type.caption,
+    lineHeight: 18,
+    marginTop: 3,
+  },
 });

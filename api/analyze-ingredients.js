@@ -2,7 +2,33 @@ import { consumeScanQuota } from "../lib/scan-limits.js";
 import { getAuthenticatedUser } from "../lib/request-auth.js";
 
 export const config = {
-  maxDuration: 90,
+  maxDuration: 120,
+};
+
+const menuExtractionFormat = {
+  type: "json_schema",
+  name: "menu_extraction",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["language", "dishes"],
+    properties: {
+      language: { type: "string" },
+      dishes: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["name", "description"],
+          properties: {
+            name: { type: "string" },
+            description: { type: "string" },
+          },
+        },
+      },
+    },
+  },
 };
 
 const menuResponseFormat = {
@@ -111,76 +137,102 @@ export default async function handler(req, res) {
       });
     }
 
-    const prompt = isMenu
-      ? [
-          "Analysiere ausschliesslich die sichtbare Speisekarte in allen Bildern. Die Bilder können mehrere Seiten derselben Speisekarte sein.",
-          "Fasse die Seiten zusammen und vermeide doppelte Gerichte.",
-          "Erfinde keine Gerichte.",
-          "Wenn ein Gericht nicht lesbar ist, lass es weg.",
-          "Wenn vor einem Gericht eine Nummer steht, übernimm die Nummer zur Orientierung, z.B. '12 Pasta Arrabbiata'.",
-          `Die Sprache des Users ist: ${userLanguage === "de" ? "Deutsch" : String(userLanguage).slice(0, 20)}. Alle Erklärungen für den User müssen auf Deutsch sein. Das gilt insbesondere für description, reason, problematicIngredients, adaptationSuggestion und generalNotes.`,
-          "Behalte im Feld name den originalen Namen des Gerichts von der Speisekarte bei, damit der User es wiederfindet.",
-          "Erkenne die hauptsächliche Sprache der Speisekarte und gib sie im Feld language als kurzen ISO-639-1-Code aus, zum Beispiel de, en, it, es oder fr.",
-          `Das Ernährungsprofil ist: ${diet === "vegetarian" ? "vegetarisch" : diet === "flexitarian" ? "flexitarisch mit Fokus auf pflanzliche Optionen" : "vegan"}.`,
-          `Zusätzlich zu vermeiden: ${
-            Array.isArray(exclusions) && exclusions.length
-              ? exclusions
-                  .map((item) => String(item).slice(0, 80))
-                  .slice(0, 20)
-                  .join(", ")
-              : "keine weiteren Angaben"
-          }.`,
-          "Erfasse jedes lesbare Gericht, auch wenn es nicht direkt zum Profil passt.",
-          "Markiere Gerichte als possibly_adaptable, wenn sie durch Weglassen oder Ersetzen einzelner Bestandteile zum Profil passen könnten.",
-          "Nenne bei possibly_adaptable immer eine konkrete adaptationSuggestion und eine konkrete questionForRestaurant.",
-          "Wenn bei einem Gericht keine Anpassung oder Restaurantfrage nötig ist, setze die entsprechenden Pflichtfelder auf einen leeren String.",
-          "questionForRestaurantGerman ist immer eine natürliche deutsche Frage, die der User dem Restaurant stellen kann.",
-          "questionForRestaurantEnglish ist immer eine natürliche englische Übersetzung derselben Frage.",
-          "Wenn die Speisekarte Deutsch ist, setze questionForRestaurant und questionForRestaurantGerman auf dieselbe deutsche Frage und questionForRestaurantLocal auf einen leeren String.",
-          "Wenn die Speisekarte nicht Deutsch ist, setze questionForRestaurantLocal auf eine natürliche Übersetzung der deutschen Frage in die Sprache der Speisekarte. Setze questionForRestaurant auf dieselbe fremdsprachige Frage, damit sie im Restaurant direkt vorgezeigt werden kann.",
-          "Markiere ein Gericht nur dann als vegan, wenn die sichtbaren Angaben eindeutig sind. Nutze sonst unclear.",
-          "Gib selbst bei Unsicherheit jedes lesbare Gericht aus und erkläre die Unsicherheit im reason-Feld.",
-        ].join("\n")
-      : [
-          "Analysiere diese Zutatenliste für eine deutsche vegetarische/vegane Food-App.",
-          "Antworte in allen Freitextfeldern auf Deutsch, unabhängig von der Sprache auf der Verpackung.",
-          "Lies die sichtbaren Zutaten so vollständig wie möglich aus.",
-          "Antworte ausschliesslich als valides JSON ohne Markdown.",
-          "Pflichtschema: {classification:'vegan'|'vegetarian'|'not_suitable'|'unclear',confidence:'high'|'medium'|'low',productName?:string,brand?:string,detectedText?:string,summary:string,detectedIngredients:Array<{name:string,normalizedName?:string,status:'suitable'|'problematic'|'unclear',reason?:string}>,problematicIngredients:Array<{name:string,reason:string,sourceType?:'animal'|'possibly_animal'|'other'}>,possibleAllergens:string[],uncertainties:string[],suggestedAlternatives:Array<{name:string,reason:string}>}.",
-          "Nenne Unsicherheiten ausdrücklich. Erfinde keine Produktdaten, Allergensicherheit oder Alternativen.",
-        ].join("\n");
-
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      signal: AbortSignal.timeout(85000),
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        max_output_tokens: isMenu ? 4000 : 1200,
-        ...(isMenu ? { text: { format: menuResponseFormat } } : {}),
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_text", text: prompt },
-              ...images.map((image) => ({
-                type: "input_image",
-                image_url: image,
-              })),
-            ],
-          },
+    if (isMenu) {
+      const extractionPrompt = [
+        "Lies ausschliesslich die sichtbare Speisekarte in allen Bildern und extrahiere eine vollständige Masterliste der Gerichte.",
+        "Arbeite jede Seite systematisch von oben links nach unten rechts ab. Prüfe anschliessend ein zweites Mal, ob zwischen dem ersten und letzten Gericht eine Zeile ausgelassen wurde.",
+        "Ein Gericht ist ein einzeln bestellbarer Eintrag. Kategorien, Überschriften, Preise, Zutatenoptionen und Beilagen ohne eigenen bestellbaren Eintrag sind keine Gerichte.",
+        "Fasse mehrere Seiten zusammen. Gib ein Gericht nur einmal aus, wenn derselbe Name mehrfach erscheint.",
+        "Erfinde nichts und bewerte noch nichts. Übernimm Namen exakt in der Menüsprache; behalte vorhandene Nummern bei.",
+        "description enthält nur die beim Gericht sichtbar gedruckte Beschreibung. Ist keine vorhanden, verwende einen leeren String.",
+        "language ist der hauptsächliche ISO-639-1-Sprachcode der Karte, zum Beispiel de, en, it, es oder fr.",
+      ].join("\n");
+      const extractionData = await requestOpenAI({
+        format: menuExtractionFormat,
+        maxOutputTokens: 3000,
+        content: [
+          { type: "input_text", text: extractionPrompt },
+          ...images.map((image) => ({
+            type: "input_image",
+            image_url: image,
+            detail: "high",
+          })),
         ],
-      }),
-    });
+      });
+      const extractedMenu = validateExtractedMenu(
+        safeJson(extractResponseText(extractionData)),
+      );
+      if (extractedMenu.dishes.length === 0)
+        return res.status(422).json({
+          error:
+            "Auf den Bildern konnten keine einzelnen Gerichte sicher gelesen werden. Bitte fotografiere die Speisekarte näher, gerade und mit gutem Licht.",
+          quota,
+        });
 
-    const data = await response.json();
-    if (!response.ok)
-      return res
-        .status(response.status)
-        .json({ error: data.error?.message || "OpenAI request failed" });
+      const assessmentPrompt = [
+        "Bewerte exakt die folgende bereits extrahierte Masterliste. Lass kein Gericht weg, füge keines hinzu und ändere die Namen nicht.",
+        `Die Masterliste enthält exakt ${extractedMenu.dishes.length} Gerichte. Die Ausgabe muss ebenfalls exakt ${extractedMenu.dishes.length} Gerichte in derselben Reihenfolge enthalten.`,
+        `Masterliste: ${JSON.stringify(extractedMenu)}`,
+        `Die Sprache des Users ist: ${userLanguage === "de" ? "Deutsch" : String(userLanguage).slice(0, 20)}. Alle Erklärungen für den User müssen auf Deutsch sein. Das gilt insbesondere für description, reason, problematicIngredients, adaptationSuggestion und generalNotes.`,
+        `Gib language unverändert als ${extractedMenu.language} aus.`,
+        `Das Ernährungsprofil ist: ${diet === "vegetarian" ? "vegetarisch" : diet === "flexitarian" ? "flexitarisch mit Fokus auf pflanzliche Optionen" : "vegan"}.`,
+        `Zusätzlich zu vermeiden: ${
+          Array.isArray(exclusions) && exclusions.length
+            ? exclusions
+                .map((item) => String(item).slice(0, 80))
+                .slice(0, 20)
+                .join(", ")
+            : "keine weiteren Angaben"
+        }.`,
+        "Wende die folgende Klassifikation strikt und in dieser Priorität an; dieselben sichtbaren Angaben müssen immer zur selben Klasse führen.",
+        "vegan: Das Gericht passt sicher zu einem veganen Profil und widerspricht keinen persönlichen Ausschlüssen.",
+        "vegetarian: Das Gericht ist sicher vegetarisch, aber nicht vegan. Verwende diese Klasse nur, wenn das Profil vegetarisch oder flexitarisch ist und keine Ausschlüsse verletzt werden.",
+        "possibly_adaptable: Das Gericht passt aktuell nicht zum Profil, kann aber durch das Weglassen oder Ersetzen von höchstens zwei klar benennbaren Bestandteilen passend werden.",
+        "not_suitable: Das Gericht passt nicht und lässt sich nicht durch höchstens zwei einfache Änderungen passend machen.",
+        "unclear: Die sichtbaren Angaben reichen für keine der vorigen Einstufungen. Vermutete typische Zutaten allein sind kein Beweis.",
+        "Bei veganem Profil gilt ein vegetarisches Gericht mit leicht entfernbarer Milch, Butter, Sahne, Käse oder Ei als possibly_adaptable, nicht als vegetarian.",
+        "Persönliche Ausschlüsse haben Vorrang vor vegan/vegetarisch. Ein sonst passendes Gericht ist possibly_adaptable, wenn der ausgeschlossene Bestandteil einfach entfernt werden kann, sonst not_suitable.",
+        "Nenne bei possibly_adaptable immer eine konkrete adaptationSuggestion und eine konkrete questionForRestaurant.",
+        "Wenn bei einem Gericht keine Anpassung oder Restaurantfrage nötig ist, setze die entsprechenden Pflichtfelder auf einen leeren String.",
+        "questionForRestaurantGerman ist immer eine natürliche deutsche Frage, die der User dem Restaurant stellen kann.",
+        "questionForRestaurantEnglish ist immer eine natürliche englische Übersetzung derselben Frage.",
+        "questionForRestaurantLocal ist immer dieselbe Frage in der Sprache der Speisekarte, auch wenn diese Sprache Deutsch oder Englisch ist. Das Feld darf bei einer vorhandenen Restaurantfrage nicht leer sein.",
+        "Setze questionForRestaurant immer auf denselben Text wie questionForRestaurantLocal, damit die Frage direkt im Restaurant gezeigt werden kann.",
+        "Wenn die Speisekarte nicht Deutsch ist, setze questionForRestaurantLocal auf eine natürliche Übersetzung der deutschen Frage in die Sprache der Speisekarte. Setze questionForRestaurant auf dieselbe fremdsprachige Frage, damit sie im Restaurant direkt vorgezeigt werden kann.",
+        "Markiere ein Gericht nur dann als vegan, wenn die sichtbaren Angaben eindeutig sind. Nutze sonst unclear.",
+        "Wenn die Angaben bei einem Gericht nicht reichen, behalte das Gericht trotzdem und verwende unclear. Ein unsicheres Gericht darf niemals aus der Liste verschwinden.",
+      ].join("\n");
+      const assessmentData = await requestOpenAI({
+        format: menuResponseFormat,
+        maxOutputTokens: 5000,
+        content: [{ type: "input_text", text: assessmentPrompt }],
+      });
+      const assessedMenu = validateMenuResult(
+        safeJson(extractResponseText(assessmentData)),
+      );
+      const result = reconcileMenuAssessment(extractedMenu, assessedMenu);
+      return res.status(200).json({
+        result,
+        source: "OpenAI Responses API (Extraktion + Bewertung)",
+        quota,
+      });
+    }
+
+    const prompt = [
+      "Analysiere diese Zutatenliste für eine deutsche vegetarische/vegane Food-App.",
+      "Antworte in allen Freitextfeldern auf Deutsch, unabhängig von der Sprache auf der Verpackung.",
+      "Lies die sichtbaren Zutaten so vollständig wie möglich aus.",
+      "Antworte ausschliesslich als valides JSON ohne Markdown.",
+      "Pflichtschema: {classification:'vegan'|'vegetarian'|'not_suitable'|'unclear',confidence:'high'|'medium'|'low',productName?:string,brand?:string,detectedText?:string,summary:string,detectedIngredients:Array<{name:string,normalizedName?:string,status:'suitable'|'problematic'|'unclear',reason?:string}>,problematicIngredients:Array<{name:string,reason:string,sourceType?:'animal'|'possibly_animal'|'other'}>,possibleAllergens:string[],uncertainties:string[],suggestedAlternatives:Array<{name:string,reason:string}>}.",
+      "Nenne Unsicherheiten ausdrücklich. Erfinde keine Produktdaten, Allergensicherheit oder Alternativen.",
+    ].join("\n");
+    const data = await requestOpenAI({
+      maxOutputTokens: 1200,
+      content: [
+        { type: "input_text", text: prompt },
+        { type: "input_image", image_url: images[0], detail: "auto" },
+      ],
+    });
 
     const text = extractResponseText(data);
     if (!text)
@@ -188,20 +240,6 @@ export default async function handler(req, res) {
         error:
           "OpenAI hat keine lesbare Analyse zurückgegeben. Bitte Bild erneut versuchen.",
       });
-    if (isMenu) {
-      const result = validateMenuResult(safeJson(text));
-      if (result.dishes.length === 0)
-        return res.status(422).json({
-          error:
-            "Auf den Bildern konnten keine einzelnen Gerichte sicher gelesen werden. Bitte fotografiere die Speisekarte näher, gerade und mit gutem Licht.",
-          quota,
-        });
-      return res.status(200).json({
-        result,
-        source: "OpenAI Responses API",
-        quota,
-      });
-    }
     return res.status(200).json({
       result: validateIngredientResult(safeJson(text)),
       source: "OpenAI Responses API",
@@ -213,6 +251,93 @@ export default async function handler(req, res) {
         error instanceof Error ? error.message : "KI-Analyse nicht erreichbar.",
     });
   }
+}
+
+async function requestOpenAI({ content, format, maxOutputTokens }) {
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    signal: AbortSignal.timeout(60000),
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+      temperature: 0,
+      max_output_tokens: maxOutputTokens,
+      ...(format ? { text: { format } } : {}),
+      input: [{ role: "user", content }],
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.error?.message || "OpenAI request failed");
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+export function validateExtractedMenu(value) {
+  const seen = new Set();
+  const dishes = Array.isArray(value?.dishes)
+    ? value.dishes.slice(0, 100).flatMap((dish) => {
+        if (!dish || typeof dish.name !== "string") return [];
+        const name = dish.name.trim().slice(0, 160);
+        const key = normalizeDishName(name);
+        if (!key || seen.has(key)) return [];
+        seen.add(key);
+        return [
+          {
+            name,
+            description:
+              typeof dish.description === "string"
+                ? dish.description.trim().slice(0, 500)
+                : "",
+          },
+        ];
+      })
+    : [];
+  return {
+    language:
+      typeof value?.language === "string"
+        ? value.language.trim().slice(0, 20) || "de"
+        : "de",
+    dishes,
+  };
+}
+
+export function reconcileMenuAssessment(extractedMenu, assessedMenu) {
+  const assessedByName = new Map(
+    assessedMenu.dishes.map((dish) => [normalizeDishName(dish.name), dish]),
+  );
+  const used = new Set();
+  const dishes = extractedMenu.dishes.map((extractedDish, index) => {
+    const exact = assessedByName.get(normalizeDishName(extractedDish.name));
+    const positional = assessedMenu.dishes[index];
+    const assessed = exact || (!used.has(positional) ? positional : undefined);
+    if (assessed) used.add(assessed);
+    return assessed
+      ? { ...assessed, name: extractedDish.name }
+      : {
+          name: extractedDish.name,
+          description: extractedDish.description,
+          classification: "unclear",
+          reason:
+            "Das Gericht wurde gelesen, konnte aber nicht sicher bewertet werden.",
+          problematicIngredients: [],
+          adaptationSuggestion: "",
+          questionForRestaurant: "",
+          questionForRestaurantGerman: "",
+          questionForRestaurantLocal: "",
+          questionForRestaurantEnglish: "",
+        };
+  });
+  return {
+    language: extractedMenu.language,
+    dishes,
+    generalNotes: assessedMenu.generalNotes,
+  };
 }
 
 function safeJson(text) {
@@ -345,7 +470,7 @@ export function validateMenuResult(value) {
     "possibly_adaptable",
     "unclear",
   ]);
-  const dishes = Array.isArray(value?.dishes)
+  const rawDishes = Array.isArray(value?.dishes)
     ? value.dishes.slice(0, 80).map((dish) => ({
         name: String(dish?.name || "Unleserliches Gericht").slice(0, 160),
         ...(typeof dish?.description === "string"
@@ -386,6 +511,13 @@ export function validateMenuResult(value) {
           : {}),
       }))
     : [];
+  const seenDishNames = new Set();
+  const dishes = rawDishes.filter((dish) => {
+    const key = normalizeDishName(dish.name);
+    if (!key || seenDishNames.has(key)) return false;
+    seenDishNames.add(key);
+    return true;
+  });
   return {
     ...(typeof value?.language === "string"
       ? { language: value.language.slice(0, 40) }
@@ -393,6 +525,16 @@ export function validateMenuResult(value) {
     dishes,
     generalNotes: cleanStrings(value?.generalNotes),
   };
+}
+
+function normalizeDishName(value) {
+  return String(value)
+    .toLocaleLowerCase("de")
+    .replace(/^\s*\d+[.)-]?\s*/, "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function cleanStrings(value) {

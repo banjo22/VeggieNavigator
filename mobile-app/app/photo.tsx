@@ -13,6 +13,8 @@ import {
 } from "react-native";
 import {
   Camera,
+  Check,
+  Clock3,
   Image as ImageIcon,
   Plus,
   ShieldCheck,
@@ -46,6 +48,9 @@ export default function Photo() {
   const { profile, addScan, saveMenuAnalysis } = useAppStore();
   const [images, setImages] = useState<SelectedImage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [analysisStage, setAnalysisStage] = useState<
+    "upload" | "read" | "finish"
+  >("upload");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -55,11 +60,15 @@ export default function Photo() {
   const prepare = async (assets: ImagePicker.ImagePickerAsset[]) =>
     Promise.all(
       assets.map(async (asset) => {
+        const maximumWidth = mode === "menu" ? 1280 : 1400;
+        const targetWidth = Math.min(asset.width || maximumWidth, maximumWidth);
         const edited = await ImageManipulator.manipulateAsync(
           asset.uri,
-          [{ resize: { width: 1600 } }],
+          asset.width && asset.width <= maximumWidth
+            ? []
+            : [{ resize: { width: targetWidth } }],
           {
-            compress: 0.72,
+            compress: mode === "menu" ? 0.65 : 0.7,
             format: ImageManipulator.SaveFormat.JPEG,
             base64: true,
           },
@@ -109,6 +118,7 @@ export default function Photo() {
   const analyze = async () => {
     if (!images.length) return;
     setLoading(true);
+    setAnalysisStage("upload");
     setError("");
     const temporary: Awaited<
       ReturnType<typeof uploadTemporaryAnalysisImage>
@@ -128,6 +138,7 @@ export default function Photo() {
         ),
       );
       temporary.push(...uploads);
+      setAnalysisStage("read");
       const firstUpload = uploads[0];
       if (!firstUpload) throw new Error("Kein Bild konnte hochgeladen werden.");
       const result = await analyzeImage(
@@ -140,12 +151,14 @@ export default function Photo() {
         profile.language,
       );
       if (mode === "ingredients") {
+        setAnalysisStage("finish");
         await addScan("ingredients", result as ProductResult);
         router.replace({
           pathname: "/result",
           params: { code: (result as ProductResult).code },
         });
       } else {
+        setAnalysisStage("finish");
         await saveMenuAnalysis(result as MenuAnalysis);
         router.replace("/menu-result");
       }
@@ -223,6 +236,50 @@ export default function Photo() {
       )}
       {error ? (
         <ErrorState message={error} onRetry={() => setError("")} />
+      ) : null}
+      {loading ? (
+        <View style={s.progressCard} accessibilityLiveRegion="polite">
+          <View style={s.progressHeader}>
+            <Clock3 color={colors.primary} size={20} />
+            <View style={{ flex: 1 }}>
+              <Text style={s.progressTitle}>
+                {analysisStage === "upload"
+                  ? "Bilder werden vorbereitet"
+                  : analysisStage === "read"
+                    ? "Gerichte werden geprüft"
+                    : "Ergebnis wird gespeichert"}
+              </Text>
+              <Text style={s.progressCopy}>
+                {analysisStage === "read"
+                  ? "Die KI liest die Karte, gleicht dein Profil ab und erstellt Restaurantfragen."
+                  : "Bitte lass die App kurz geöffnet."}
+              </Text>
+            </View>
+          </View>
+          <View style={s.steps}>
+            {[
+              ["upload", "Bilder"],
+              ["read", "Analyse"],
+              ["finish", "Fertig"],
+            ].map(([stage, label], index) => {
+              const order = { upload: 0, read: 1, finish: 2 } as const;
+              const done = order[analysisStage] > index;
+              const active = order[analysisStage] === index;
+              return (
+                <View style={s.step} key={stage}>
+                  <View
+                    style={[s.stepDot, done || active ? s.stepDotActive : null]}
+                  >
+                    {done ? <Check color="#fff" size={12} /> : null}
+                  </View>
+                  <Text style={active ? s.stepTextActive : s.stepText}>
+                    {label}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        </View>
       ) : null}
       {!images.length ? (
         <>
@@ -357,5 +414,45 @@ const s = StyleSheet.create({
     fontSize: type.caption,
     lineHeight: 19,
     color: colors.textMuted,
+  },
+  progressCard: {
+    gap: space.lg,
+    padding: space.lg,
+    borderRadius: radius.lg,
+    backgroundColor: colors.primarySoft,
+  },
+  progressHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: space.md,
+  },
+  progressTitle: { color: colors.text, fontWeight: "800", fontSize: type.body },
+  progressCopy: {
+    color: colors.textMuted,
+    fontSize: type.caption,
+    lineHeight: 19,
+    marginTop: 3,
+  },
+  steps: { flexDirection: "row", justifyContent: "space-between" },
+  step: { flex: 1, alignItems: "center", gap: space.xs },
+  stepDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+  },
+  stepDotActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary,
+  },
+  stepText: { color: colors.textMuted, fontSize: type.caption },
+  stepTextActive: {
+    color: colors.primary,
+    fontSize: type.caption,
+    fontWeight: "800",
   },
 });
